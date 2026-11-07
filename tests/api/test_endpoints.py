@@ -83,7 +83,8 @@ def test_business_endpoints_are_get_only(api_client):
         "/api/v1/market-watches/active",
         "/api/v1/audit/decisions",
     ]:
-        assert client.post(path, headers=_headers()).status_code == 405
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            assert client.request(method, path, headers=_headers()).status_code == 405
 
 
 def test_system_status_returns_none_when_runtime_view_empty(api_client):
@@ -310,6 +311,9 @@ def _safe_privilege_snapshot():
         "api_base_column_access": False,
         "owner_schema_create": False,
         "owner_base_table_access": False,
+        "owner_base_table_maintain": False,
+        "owner_has_role_memberships": False,
+        "owner_unapproved_column_access": False,
         "owner_column_allowlist_ok": True,
         "approved_view_count": 6,
         "approved_view_owners_ok": True,
@@ -331,6 +335,9 @@ def test_database_privilege_guard_accepts_strict_view_only_boundary():
     ("api_base_column_access", True),
     ("owner_schema_create", True),
     ("owner_base_table_access", True),
+    ("owner_base_table_maintain", True),
+    ("owner_has_role_memberships", True),
+    ("owner_unapproved_column_access", True),
     ("owner_column_allowlist_ok", False),
     ("approved_view_count", 5),
     ("approved_view_owners_ok", False),
