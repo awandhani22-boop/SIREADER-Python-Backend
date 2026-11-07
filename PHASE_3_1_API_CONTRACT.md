@@ -1,7 +1,7 @@
 # SIREADER Phase 3.1 — Batch 2 Architecture & API Contract
 ## Spesifikasi Desain & Kontrak API Observabilitas Read-Only
 
-- **Status Dokumen:** `PENDING EMPIRICAL VERIFICATION (DESIGN FREEZE - NOT IMPLEMENTATION-READY)`
+- **Status Dokumen:** `SUPABASE DATABASE PREREQUISITES EMPIRICALLY VERIFIED (2026-11-08); LOCAL API ACCEPTANCE PENDING`
 - **Target Role Pelaksana:** Argon (Backend Developer — Batch 2 Implementation)
 - **Target Repository:** `awandhani22-boop/SIREADER-Python-Backend`
 - **Target Branch:** `phase-3-1-api-gateway`
@@ -1312,7 +1312,7 @@ Commit implementasi Batch 2 pada branch `phase-3-1-api-gateway` menambahkan:
 
 **Sinkronisasi kontrak yang wajib dipertahankan:**
 1. Startup guard memverifikasi `current_user = sireader_api_ro`, `transaction_read_only = on`, atribut role minimal, dan privilege efektif sebelum API mulai melayani request.
-2. Startup guard menolak privilege efektif pada seluruh base tables/columns, PUBLIC table/column grants pada keenam base tables dan views, membership role pada API login maupun view owner, table/column write privileges pada approved views, privilege tambahan pada view owner di luar allowlist SELECT, dan schema CREATE.
+2. Startup guard menolak privilege efektif pada seluruh base tables/columns, PUBLIC table/column grants pada keenam base tables dan views, membership efektif yang memberi INHERIT atau SET ROLE pada API login maupun view owner (ADMIN-only creator linkage dengan INHERIT=false dan SET=false tidak memberi akses runtime), table/column write privileges pada approved views, privilege tambahan pada view owner di luar allowlist SELECT, dan schema CREATE.
 3. Startup guard memverifikasi keenam approved views dimiliki `sireader_view_owner`, dapat dibaca API, dan berhasil menjalankan bounded SELECT probe sebagai API login.
 4. Model telemetry memuat `cost`, `reserved`, dan `projected` per currency; IDR dan USD tidak pernah digabung.
 5. `InFlightAnalysisDTO` memuat `liveness_status = IN_FLIGHT_UNCONFIRMED`; field tersebut tidak menyatakan worker OS aktif.
@@ -1322,10 +1322,18 @@ Commit implementasi Batch 2 pada branch `phase-3-1-api-gateway` menambahkan:
 9. API server lokal wajib dijalankan melalui `python -m app.api.server`, yang menolak `API_HOST` selain `127.0.0.1`. Deployment BFF remote/private network membutuhkan desain dan review jaringan terpisah.
 
 
-**Batas bukti:** guard runtime tidak membuktikan isi kebijakan RLS maupun bahwa policy menghasilkan row set bisnis yang diharapkan. DBA tetap harus memeriksa `pg_policies` dan menguji hasil baca aktual pada Supabase.
+**Batas bukti:** uji PostgreSQL 16 disposable CI tetap tidak menggantikan pengujian empiris pada PostgreSQL Supabase aktual. Pada 2026-11-08, enam view aktual sudah dijalankan sebagai `sireader_api_ro` pada transaksi read-only; query langsung ke enam base tables ditolak oleh pemeriksaan privilege efektif, seluruh 15 tabel publik memiliki RLS aktif, dan seluruh owner/view grants diperiksa.
 
-**Kriteria belum terpenuhi:** belum ada bukti empiris dari instance Supabase aktual untuk membership/ownership transfer, privilege efektif, PUBLIC grants, RLS policies, dan SELECT pada keenam views menggunakan role `sireader_api_ro`. Karena itu implementasi aplikasi belum berarti database gateway sudah dapat dipakai pada lingkungan Supabase.
+**Hasil empiris Supabase (PostgreSQL 17.11):**
+1. Kedua role khusus telah dibuat. `sireader_view_owner` adalah NOLOGIN/NOBYPASSRLS/NOINHERIT dan tidak memiliki membership efektif; `sireader_api_ro` memiliki LOGIN, NOINHERIT, NOBYPASSRLS, default_transaction_read_only=on, dan CONNECTION LIMIT 3.
+2. Enam view dimiliki `sireader_view_owner`; API role memiliki SELECT saja; tidak ada hak SELECT tabel/kolom dasar, tidak ada hak tulis pada view, dan tidak ada PUBLIC/anon/authenticated table grants.
+3. Role probe sukses: view counts runtime=1, telemetry=46, in-flight=0, queue=0, market-watches=0, audit=2. Probe hanya membaca jumlah baris, bukan isi pesan Telegram atau data trading.
+4. `ai_pending_messages` dibuat mengikuti model SQLAlchemy yang ada. Kolom telemetri yang hilang ditambahkan dengan default aman: billing_currency=IDR untuk baris lama dan biaya/token tambahan=0; nilai USD historis tidak direkonstruksi atau ditebak.
+5. Hak tabel utama `postgres` dan `service_role` tetap dipertahankan. Hak `service_role` pada keenam view observability dicabut agar view tetap read-only.
 
+PostgreSQL 17 mempertahankan ADMIN-only creator membership (postgres sebagai member dari role yang dibuat oleh CREATEROLE) dengan INHERIT=false dan SET=false. Membership ini tidak memberi hak untuk mewarisi privilege atau SET ROLE; startup guard hanya menganggap membership dengan INHERIT atau SET sebagai membership efektif.
+
+**Sisa verifikasi operasional:** password untuk login `sireader_api_ro` belum diatur oleh assistant; pengguna harus menetapkannya secara privat, mengisi `SIREADER_API_DATABASE_URL` dan bearer token pada `.env` lokal, kemudian menjalankan API lokal serta memeriksa lima HTTP GET endpoints. Karena proses lokal tidak dapat dijalankan dari koneksi Supabase, status ini belum menyatakan HTTP API lokal sudah live.
 
 ---
-*Dokumen ini berstatus PENDING EMPIRICAL VERIFICATION dan belum disahkan sebagai implementation-ready sebelum pengujian empiris pada Supabase selesai diverifikasi.*
+*Status: Supabase DB gate empirically passed. Local API boot and endpoint acceptance remain pending.*
