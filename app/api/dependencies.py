@@ -38,14 +38,18 @@ def get_ro_session() -> Generator[Session, None, None]:
 
 def verify_bearer_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-) -> str:
+) -> None:
     """Memvalidasi token Bearer server-to-server.
+
+    Penanda Keberhasilan:
+    Mengembalikan None (bukan token rahasia) saat validasi berhasil.
+    Hal ini memastikan token rahasia tidak diteruskan ke handler route,
+    tidak dapat diakses oleh downstream logic, dan tidak berisiko tercatat
+    ke dalam log aplikasi.
 
     Raises:
         HTTPException 401: Jika token tidak disertakan atau tidak valid.
-
-    Returns:
-        str: Token yang telah divalidasi.
+        RuntimeError: Jika server token belum dikonfigurasi (fail-closed).
     """
     if not credentials or credentials.scheme.lower() != "bearer":
         raise HTTPException(
@@ -63,4 +67,4 @@ def verify_bearer_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return credentials.credentials
+    return None

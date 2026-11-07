@@ -1,7 +1,9 @@
 """Pengujian siklus hidup koneksi database dan penolakan mutasi (app/api/database.py)."""
 
+import concurrent.futures
 import pytest
 from sqlalchemy import text
+from app.api.config import api_settings
 from app.api.database import (
     create_ro_engine,
     ReadOnlySessionFactory,
@@ -114,3 +116,57 @@ def test_get_ro_session_dependency_always_closes():
     finally:
         deps.ro_session_factory = orig_factory
         factory.close()
+
+
+def test_ro_session_factory_concurrent_first_request(monkeypatch):
+    """Memastikan inisialisasi pada first-request concurrent aman terhadap race condition dan hanya membuat satu engine."""
+    monkeypatch.setattr(api_settings, "SIREADER_API_DATABASE_URL", "sqlite:///:memory:")
+    factory = ReadOnlySessionFactory()
+    assert factory.is_initialized is False
+
+    def worker():
+        try:
+            sess = factory.get_session()
+            val = sess.execute(text("SELECT 100")).scalar()
+            sess.close()
+            return val
+        except Exception as e:
+            return e
+
+    # Jalankan 10 thread secara bersamaan untuk memicu get_session() pada factory uninitialized
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(worker) for _ in range(10)]
+        results = [f.result() for f in futures]
+
+    assert all(r == 100 for r in results)
+    assert factory.is_initialized is True
+    factory.close()
+    assert factory.is_initialized is False
+
+
+def test_ro_session_factory_reinitialization_disposes_old_engine():
+    """Memastikan reinisialisasi mendisposisi engine lama agar connection pool tidak bocor."""
+    factory = ReadOnlySessionFactory()
+    factory.initialize(database_url="sqlite:///:memory:")
+    old_engine = factory._engine
+    assert old_engine is not None
+
+    # Track apakah old_engine.dispose() dipanggil
+    dispose_called = False
+    orig_dispose = old_engine.dispose
+
+    def tracking_dispose():
+        nonlocal dispose_called
+        dispose_called = True
+        orig_dispose()
+
+    old_engine.dispose = tracking_dispose
+
+    # Reinisialisasi dengan URL baru
+    factory.initialize(database_url="sqlite:///:memory:")
+    assert dispose_called is True
+    assert factory._engine is not old_engine
+    assert factory.is_initialized is True
+
+    factory.close()
+    assert factory.is_initialized is False

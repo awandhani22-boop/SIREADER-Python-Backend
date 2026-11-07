@@ -39,11 +39,12 @@ def test_auth_invalid_token_raises_401(monkeypatch):
 
 
 def test_auth_valid_token_succeeds(monkeypatch):
-    """Memastikan token yang cocok mengembalikan string token yang valid."""
+    """Memastikan token yang cocok berhasil divalidasi, mengembalikan None, dan TIDAK membocorkan secret token."""
     monkeypatch.setattr(api_settings, "SIREADER_API_AUTH_TOKEN", TEST_SECRET_TOKEN)
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=TEST_SECRET_TOKEN)
     result = verify_bearer_token(creds)
-    assert result == TEST_SECRET_TOKEN
+    assert result is None
+    assert result != TEST_SECRET_TOKEN
 
 
 def test_auth_fail_closed_without_server_token(monkeypatch):
