@@ -128,7 +128,7 @@ def create_ro_engine(
             database_url,
             connect_args={
                 "sslmode": "require",
-                "options": "-c default_transaction_read_only=on",
+                "options": "-c default_transaction_read_only=on -c search_path=public",
             },
             pool_size=2,
             max_overflow=0,
