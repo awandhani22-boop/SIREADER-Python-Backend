@@ -1299,27 +1299,29 @@ Argon wajib mengimplementasikan pengujian komprehensif di `tests/api/test_endpoi
 
 ## 12. Catatan Sinkronisasi Implementasi Batch 2
 
-Commit implementasi Batch 2 pada branch `phase-3-1-api-gateway` menambahkan modul berikut:
+Commit implementasi Batch 2 pada branch `phase-3-1-api-gateway` menambahkan:
 - `app/api/views.py`: enam SQLAlchemy Core view mappings.
 - `app/api/schemas.py`: Pydantic DTO response.
 - `app/api/routes/{system,telemetry,pipeline,market_watches,audit}.py`: lima endpoint GET.
-- `app/api/server.py`: FastAPI factory, lifecycle, CORS, exception handling, dan local bind guard.
+- `app/api/server.py`: FastAPI factory, lifecycle, CORS, fail-closed identity/privilege guard, dan enam bounded view probes.
 - `tests/api/test_endpoints.py`: pengujian endpoint dengan SQLite stand-in.
 - `tests/api/test_security.py`: pengujian exact token comparison.
 - `.github/workflows/api-gateway-tests.yml`: otomatisasi API tests dan core regression.
 
 **Sinkronisasi kontrak yang wajib dipertahankan:**
-1. Startup guard memverifikasi identitas `current_user = sireader_api_ro`, transaksi `transaction_read_only = on`, atribut role minimal, privilege efektif, serta berhasil mengeksekusi bounded SELECT probe pada keenam approved views sebelum API mulai melayani request.
-2. Startup guard memverifikasi tidak ada hak efektif pada base tables/columns (termasuk `MAINTAIN` bila PostgreSQL 18+), tidak ada grant table/column kepada `PUBLIC` pada enam base tables maupun enam views, tidak ada membership role untuk API login maupun view owner, tidak ada privilege table-level atau column-level tambahan pada view owner selain allowlist SELECT, schema CREATE ditolak, dan enam approved views dimiliki `sireader_view_owner` serta dapat dibaca API.
-3. Guard runtime tidak membuktikan isi kebijakan RLS atau bahwa policy menghasilkan row set yang benar. DBA tetap harus memeriksa `pg_policies` dan menguji hasil baca pada Supabase aktual.
+1. Startup guard memverifikasi `current_user = sireader_api_ro`, `transaction_read_only = on`, atribut role minimal, dan privilege efektif sebelum API mulai melayani request.
+2. Startup guard menolak privilege efektif pada seluruh base tables/columns, PUBLIC table/column grants pada keenam base tables dan views, membership role pada API login maupun view owner, table/column write privileges pada approved views, privilege tambahan pada view owner di luar allowlist SELECT, dan schema CREATE.
+3. Startup guard memverifikasi keenam approved views dimiliki `sireader_view_owner`, dapat dibaca API, dan berhasil menjalankan bounded SELECT probe sebagai API login.
 4. `ModelTelemetryDTO` memuat `cost`, `reserved`, dan `projected` per currency.
-2. `InFlightAnalysisDTO` memuat `liveness_status = IN_FLIGHT_UNCONFIRMED`. Field tersebut tidak menyatakan worker OS aktif.
-3. Uji SQLite hanya menguji kontrak aplikasi dan bukan bukti privilege PostgreSQL, view ownership, RLS, atau keberhasilan pada Supabase.
-4. GitHub Actions harus menunjukkan run yang sukses untuk commit terkait sebelum status automated tests dinyatakan lulus.
-5. API server lokal wajib dijalankan melalui entry point `python -m app.api.server`, yang menolak `API_HOST` selain `127.0.0.1`. Deployment BFF remote/private network membutuhkan desain dan review jaringan terpisah.
+5. `InFlightAnalysisDTO` memuat `liveness_status = IN_FLIGHT_UNCONFIRMED`; field tersebut tidak menyatakan worker OS aktif.
+6. Uji SQLite hanya menguji kontrak aplikasi dan bukan bukti privilege PostgreSQL, view ownership, RLS, atau keberhasilan pada Supabase.
+7. GitHub Actions harus menunjukkan run sukses untuk commit terkait sebelum automated tests dinyatakan lulus.
+8. API server lokal wajib dijalankan melalui `python -m app.api.server`, yang menolak `API_HOST` selain `127.0.0.1`. Deployment BFF remote/private network membutuhkan desain dan review jaringan terpisah.
 
-**Kriteria belum terpenuhi:** belum ada bukti empiris dari instance Supabase aktual untuk membership/ownership transfer, privilege efektif, RLS policies, dan SELECT pada keenam views menggunakan role `sireader_api_ro`. Karena itu implementasi aplikasi yang tersedia belum berarti database gateway sudah dapat dipakai pada lingkungan Supabase.
+**Batas bukti:** guard runtime tidak membuktikan isi kebijakan RLS maupun bahwa policy menghasilkan row set bisnis yang diharapkan. DBA tetap harus memeriksa `pg_policies` dan menguji hasil baca aktual pada Supabase.
 
----
+**Kriteria belum terpenuhi:** belum ada bukti empiris dari instance Supabase aktual untuk membership/ownership transfer, privilege efektif, PUBLIC grants, RLS policies, dan SELECT pada keenam views menggunakan role `sireader_api_ro`. Karena itu implementasi aplikasi belum berarti database gateway sudah dapat dipakai pada lingkungan Supabase.
+
+
 ---
 *Dokumen ini berstatus PENDING EMPIRICAL VERIFICATION dan belum disahkan sebagai implementation-ready sebelum pengujian empiris pada Supabase selesai diverifikasi.*
