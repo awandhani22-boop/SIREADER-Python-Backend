@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, insert
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
 from app.api.config import api_settings
@@ -400,3 +401,27 @@ def test_approved_views_execution_probe_propagates_view_failure():
 
     with pytest.raises(RuntimeError, match="view query failed"):
         validate_approved_views_executable(FailingSession())
+
+
+def test_database_failure_returns_503_without_leaking_connection_details(monkeypatch):
+    class BrokenSession:
+        def execute(self, statement):
+            raise OperationalError("SELECT runtime state", {}, OSError("private-db-host password=hidden"))
+
+        def close(self):
+            pass
+
+    def broken_dependency():
+        yield BrokenSession()
+
+    monkeypatch.setattr(api_settings, "SIREADER_API_AUTH_TOKEN", SECRET)
+    app = create_app(manage_database_lifecycle=False)
+    app.dependency_overrides[get_ro_session] = broken_dependency
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/status", headers=_headers())
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Read-only database is unavailable."}
+    assert "private-db-host" not in response.text
+    assert "password=hidden" not in response.text
