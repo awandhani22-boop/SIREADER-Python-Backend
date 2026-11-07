@@ -306,6 +306,8 @@ def _safe_privilege_snapshot():
     return {
         "api_schema_usage": True,
         "api_schema_create": False,
+        "api_view_write_access": False,
+        "api_view_column_write_access": False,
         "api_has_role_memberships": False,
         "api_base_table_access": False,
         "api_base_table_maintain": False,
@@ -332,6 +334,8 @@ def test_database_privilege_guard_accepts_strict_view_only_boundary():
 @pytest.mark.parametrize("key,value", [
     ("api_schema_usage", False),
     ("api_schema_create", True),
+    ("api_view_write_access", True),
+    ("api_view_column_write_access", True),
     ("api_has_role_memberships", True),
     ("api_base_table_access", True),
     ("api_base_table_maintain", True),
