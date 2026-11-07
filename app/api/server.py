@@ -149,6 +149,20 @@ api_base_column_access AS (
           AND has_column_privilege(current_user, t.oid, a.attnum, p.privilege_name)
     ) AS has_any
 ),
+api_base_table_maintain_access AS (
+    SELECT CASE
+        WHEN current_setting('server_version_num')::integer >= 180000 THEN EXISTS (
+            SELECT 1
+            FROM base_tables b
+            WHERE has_table_privilege(
+                current_user,
+                format('public.%I', b.table_name),
+                'MAINTAIN'
+            )
+        )
+        ELSE FALSE
+    END AS has_any
+),
 owner_base_table_access AS (
     SELECT EXISTS (
         SELECT 1
@@ -200,6 +214,7 @@ SELECT
         WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)
     ) AS api_has_role_memberships,
     (SELECT has_any FROM api_base_table_access) AS api_base_table_access,
+    (SELECT has_any FROM api_base_table_maintain_access) AS api_base_table_maintain,
     (SELECT has_any FROM api_base_column_access) AS api_base_column_access,
     has_schema_privilege('sireader_view_owner', 'public', 'CREATE') AS owner_schema_create,
     (SELECT has_any FROM owner_base_table_access) AS owner_base_table_access,
@@ -253,6 +268,8 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
         raise RuntimeError("sireader_api_ro must not inherit or SET ROLE through memberships.")
     if snapshot.get("api_base_table_access") is not False:
         raise RuntimeError("sireader_api_ro has an effective privilege on a protected base table.")
+    if snapshot.get("api_base_table_maintain") is not False:
+        raise RuntimeError("sireader_api_ro must not have MAINTAIN on protected base tables.")
     if snapshot.get("api_base_column_access") is not False:
         raise RuntimeError("sireader_api_ro has an effective privilege on a protected base-table column.")
     if snapshot.get("owner_schema_create") is not False:
