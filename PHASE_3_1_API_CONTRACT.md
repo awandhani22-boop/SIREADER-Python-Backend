@@ -1310,7 +1310,7 @@ Commit implementasi Batch 2 pada branch `phase-3-1-api-gateway` menambahkan modu
 
 **Sinkronisasi kontrak yang wajib dipertahankan:**
 1. Startup guard memverifikasi identitas `current_user = sireader_api_ro`, transaksi `transaction_read_only = on`, atribut role minimal, privilege efektif, serta berhasil mengeksekusi bounded SELECT probe pada keenam approved views sebelum API mulai melayani request.
-2. Startup guard memverifikasi tidak ada hak efektif pada base tables/columns (termasuk `MAINTAIN` bila PostgreSQL 18+), tidak ada membership role untuk API login maupun view owner, tidak ada privilege table-level atau column-level tambahan pada view owner selain allowlist SELECT, schema CREATE ditolak, dan enam approved views dimiliki `sireader_view_owner` serta dapat dibaca API.
+2. Startup guard memverifikasi tidak ada hak efektif pada base tables/columns (termasuk `MAINTAIN` bila PostgreSQL 18+), tidak ada grant table/column kepada `PUBLIC` pada enam base tables maupun enam views, tidak ada membership role untuk API login maupun view owner, tidak ada privilege table-level atau column-level tambahan pada view owner selain allowlist SELECT, schema CREATE ditolak, dan enam approved views dimiliki `sireader_view_owner` serta dapat dibaca API.
 3. Guard runtime tidak membuktikan isi kebijakan RLS atau bahwa policy menghasilkan row set yang benar. DBA tetap harus memeriksa `pg_policies` dan menguji hasil baca pada Supabase aktual.
 4. `ModelTelemetryDTO` memuat `cost`, `reserved`, dan `projected` per currency.
 2. `InFlightAnalysisDTO` memuat `liveness_status = IN_FLIGHT_UNCONFIRMED`. Field tersebut tidak menyatakan worker OS aktif.
