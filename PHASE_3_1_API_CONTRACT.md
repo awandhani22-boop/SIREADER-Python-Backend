@@ -1191,7 +1191,7 @@ Implementasi Batch 2 dinyatakan lulus kriteria keamanan jika memenuhi 14 kriteri
 4. **Isolasi Host Binding (Strict 127.0.0.1):** Uvicorn pada deployment lokal wajib melakukan bind ke `127.0.0.1` dan dilarang mengikat ke `0.0.0.0`. Dilarang membuka API Gateway langsung ke internet publik.
 5. **Proteksi Jaringan Privat (Private Network Boundary):** Akses antar-service (misal dari Virtual Office BFF) wajib melalui jaringan privat / VPC terproteksi firewall. Binding `127.0.0.1` tidak diklaim otomatis aman jika reverse proxy meneruskan trafik tanpa filter.
 6. **Exact Token Comparison:** `verify_api_token()` menggunakan perbandingan waktu-konstan persis (`secrets.compare_digest(provided_token, expected_token)`) tanpa `.strip()` pada `provided_token`.
-7. **Zero Base Table Privileges (Effective Privilege Enforcement):** Seluruh kueri dieksekusi HANYA pada 6 View (`v_api_*`). `has_table_privilege()` untuk `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, dan `TRIGGER`, serta `has_column_privilege()` untuk `SELECT`, `INSERT`, `UPDATE`, dan `REFERENCES`, pada seluruh base tables harus bernilai `false` bagi `sireader_api_ro`. SELECT pada keenam approved views harus bernilai `true`.
+7. **Zero Base Table Privileges (Effective Privilege Enforcement):** Seluruh kueri dieksekusi HANYA pada 6 View (`v_api_*`). `has_table_privilege()` untuk `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, dan `TRIGGER`, serta `has_column_privilege()` untuk `SELECT`, `INSERT`, `UPDATE`, dan `REFERENCES`, pada seluruh base tables harus bernilai `false` bagi `sireader_api_ro`. Pada PostgreSQL 18+, privilege tabel `MAINTAIN` juga wajib `false`. SELECT pada keenam approved views harus bernilai `true`.
 8. **Pencabutan Hak CREATE Sementara (View Owner Hardening):** `sireader_view_owner` memiliki status permanen `has_schema_privilege('sireader_view_owner', 'public', 'CREATE') = false` setelah pemindahan kepemilikan selesai.
 9. **Zero Foreign Keys Exposed:** `analysis_log_id`, `trade_episode_id`, dan foreign key internal lainnya tidak diekspos di View audit maupun endpoint publik.
 10. **Separation of Currencies:** IDR dan USD dilaporkan terpisah tanpa penjumlahan lintas mata uang pada seluruh total, reservasi, dan model breakdown.
@@ -1309,7 +1309,10 @@ Commit implementasi Batch 2 pada branch `phase-3-1-api-gateway` menambahkan modu
 - `.github/workflows/api-gateway-tests.yml`: otomatisasi API tests dan core regression.
 
 **Sinkronisasi kontrak yang wajib dipertahankan:**
-1. `ModelTelemetryDTO` memuat `cost`, `reserved`, dan `projected` per currency.
+1. Startup guard memverifikasi identitas `current_user = sireader_api_ro`, transaksi `transaction_read_only = on`, atribut role minimal, dan privilege efektif sebelum API mulai melayani request.
+2. Startup guard memverifikasi tidak ada hak efektif pada base tables/columns (termasuk `MAINTAIN` bila PostgreSQL 18+), tidak ada membership role untuk API login, schema CREATE ditolak, owner hanya memiliki allowlisted column SELECT, dan enam approved views dimiliki `sireader_view_owner` serta dapat dibaca API.
+3. Guard runtime tidak membuktikan isi kebijakan RLS atau bahwa policy menghasilkan row set yang benar. DBA tetap harus memeriksa `pg_policies` dan menguji hasil baca pada Supabase aktual.
+4. `ModelTelemetryDTO` memuat `cost`, `reserved`, dan `projected` per currency.
 2. `InFlightAnalysisDTO` memuat `liveness_status = IN_FLIGHT_UNCONFIRMED`. Field tersebut tidak menyatakan worker OS aktif.
 3. Uji SQLite hanya menguji kontrak aplikasi dan bukan bukti privilege PostgreSQL, view ownership, RLS, atau keberhasilan pada Supabase.
 4. GitHub Actions harus menunjukkan run yang sukses untuk commit terkait sebelum status automated tests dinyatakan lulus.
