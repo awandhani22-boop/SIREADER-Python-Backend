@@ -15,6 +15,7 @@ from app.api.server import (
     validate_local_bind_host,
     validate_ro_database_identity,
     validate_ro_database_privileges,
+    validate_approved_views_executable,
 )
 from app.api.views import (
     metadata,
@@ -354,3 +355,40 @@ def test_database_privilege_guard_rejects_unsafe_boundary(key, value):
 def test_database_privilege_guard_rejects_missing_snapshot():
     with pytest.raises(RuntimeError):
         validate_ro_database_privileges(None)
+
+
+def test_approved_views_execution_probe_checks_exact_allowlist():
+    class FakeResult:
+        def first(self):
+            return None
+
+    class FakeSession:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement):
+            self.statements.append(str(statement))
+            return FakeResult()
+
+    session = FakeSession()
+    validate_approved_views_executable(session)
+    assert len(session.statements) == 6
+    assert all(statement.startswith("SELECT 1 FROM public.") for statement in session.statements)
+    assert all(statement.endswith("LIMIT 1") for statement in session.statements)
+    assert {statement.split("FROM public.", 1)[1].split()[0] for statement in session.statements} == {
+        "v_api_system_runtime_state",
+        "v_api_telemetry_usage",
+        "v_api_active_in_flight_tasks",
+        "v_api_queued_pending_messages",
+        "v_api_active_market_watches",
+        "v_api_audit_decisions",
+    }
+
+
+def test_approved_views_execution_probe_propagates_view_failure():
+    class FailingSession:
+        def execute(self, statement):
+            raise RuntimeError("view query failed")
+
+    with pytest.raises(RuntimeError, match="view query failed"):
+        validate_approved_views_executable(FailingSession())
