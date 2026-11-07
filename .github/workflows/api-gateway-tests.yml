@@ -39,6 +39,17 @@ jobs:
             tests/api/test_security.py \
             tests/api/test_endpoints.py
 
+      - name: Compile API package
+        run: |
+          python -m compileall -q app/api
+
       - name: Run core regression tests
+        env:
+          # Isolated placeholders required by app.config.Settings at import time.
+          # These values are not used to connect to PostgreSQL or Telegram.
+          DATABASE_URL: postgresql+psycopg://ci:ci@127.0.0.1:5432/ci
+          TELEGRAM_API_ID: "1"
+          TELEGRAM_API_HASH: "ci-test-placeholder"
+          TELEGRAM_TARGET_CHAT_ID: "-1000000000000"
         run: |
           pytest -q test_decision_engine.py test_decision_service.py
