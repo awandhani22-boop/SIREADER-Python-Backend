@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.config import api_settings
 from app.api.dependencies import get_ro_session
-from app.api.server import create_app, validate_local_bind_host
+from app.api.server import create_app, validate_local_bind_host, validate_ro_database_identity
 from app.api.views import (
     metadata,
     v_api_active_in_flight_tasks,
@@ -234,3 +234,62 @@ def test_local_bind_rejects_public_interface():
     with pytest.raises(RuntimeError):
         validate_local_bind_host("0.0.0.0")
     assert validate_local_bind_host("127.0.0.1") == "127.0.0.1"
+
+
+@pytest.mark.parametrize("identity", [
+    {
+        "role_name": "postgres",
+        "transaction_read_only": "on",
+        "rolcanlogin": True,
+        "rolsuper": False,
+        "rolinherit": False,
+        "rolcreatedb": False,
+        "rolcreaterole": False,
+        "rolreplication": False,
+        "rolbypassrls": False,
+    },
+    {
+        "role_name": "sireader_api_ro",
+        "transaction_read_only": "off",
+        "rolcanlogin": True,
+        "rolsuper": False,
+        "rolinherit": False,
+        "rolcreatedb": False,
+        "rolcreaterole": False,
+        "rolreplication": False,
+        "rolbypassrls": False,
+    },
+    {
+        "role_name": "sireader_api_ro",
+        "transaction_read_only": "on",
+        "rolcanlogin": True,
+        "rolsuper": True,
+        "rolinherit": False,
+        "rolcreatedb": False,
+        "rolcreaterole": False,
+        "rolreplication": False,
+        "rolbypassrls": False,
+    },
+])
+def test_database_identity_guard_rejects_unsafe_connections(identity):
+    with pytest.raises(RuntimeError):
+        validate_ro_database_identity(identity)
+
+
+def test_database_identity_guard_accepts_dedicated_readonly_role():
+    validate_ro_database_identity({
+        "role_name": "sireader_api_ro",
+        "transaction_read_only": "on",
+        "rolcanlogin": True,
+        "rolsuper": False,
+        "rolinherit": False,
+        "rolcreatedb": False,
+        "rolcreaterole": False,
+        "rolreplication": False,
+        "rolbypassrls": False,
+    })
+
+
+def test_database_identity_guard_rejects_missing_identity():
+    with pytest.raises(RuntimeError):
+        validate_ro_database_identity(None)
