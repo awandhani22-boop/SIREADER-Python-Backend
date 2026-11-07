@@ -24,6 +24,15 @@ from app.api.routes import (
 
 logger = logging.getLogger(__name__)
 
+APPROVED_VIEW_NAMES = (
+    "v_api_system_runtime_state",
+    "v_api_telemetry_usage",
+    "v_api_active_in_flight_tasks",
+    "v_api_queued_pending_messages",
+    "v_api_active_market_watches",
+    "v_api_audit_decisions",
+)
+
 PRIVILEGE_AUDIT_SQL = """
 WITH
 base_tables(table_name) AS (
@@ -343,6 +352,13 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
         raise RuntimeError("sireader_view_owner role attributes violate the least-privilege policy.")
 
 
+def validate_approved_views_executable(session: Any) -> None:
+    """Execute bounded read-only probes against all approved views as the API login role."""
+    for view_name in APPROVED_VIEW_NAMES:
+        # view_name is selected only from the module-level allowlist above.
+        session.execute(text(f"SELECT 1 FROM public.{view_name} LIMIT 1")).first()
+
+
 def _validate_live_database_session() -> None:
     """Verify role attributes, connection mode, effective grants and view ownership before serving requests."""
 
@@ -369,6 +385,7 @@ def _validate_live_database_session() -> None:
         validate_ro_database_identity(identity)
         privileges = session.execute(text(PRIVILEGE_AUDIT_SQL)).mappings().one_or_none()
         validate_ro_database_privileges(privileges)
+        validate_approved_views_executable(session)
     finally:
         session.close()
 
