@@ -386,28 +386,55 @@ Aliasing kolom tetap mengekspos integer sequence asli dari database yang secara 
 
 #### B. Audit Persyaratan PostgreSQL & Prosedur Perpindahan Kepemilikan View
 
-PostgreSQL membedakan jalur perpindahan ownership oleh superuser dan non-superuser. Persyaratan berikut tidak boleh dicampur:
+PostgreSQL mengharuskan role yang menjalankan \`ALTER VIEW ... OWNER TO\` dapat melakukan \`SET ROLE\` ke calon owner, dan calon owner memiliki \`CREATE\` pada schema view. Superuser dapat melewati kedua pemeriksaan tersebut. Pada Supabase Hosted, jangan mengasumsikan role \`postgres\` merupakan superuser; gunakan pola membership sementara yang didokumentasikan Supabase.
 
-1. **Eksekutor non-superuser:** harus merupakan owner view saat ini atau memiliki kewenangan yang sesuai, serta menjadi anggota langsung/tidak langsung dari role calon owner.
-2. **Calon owner:** pada jalur non-superuser, calon owner harus memiliki privilege `CREATE` pada schema tempat view berada.
-3. **Eksekutor superuser:** superuser dapat mengubah ownership tanpa syarat membership dan tanpa memberikan privilege `CREATE` pada schema kepada calon owner.
-4. **Prasyarat Supabase:** jangan mengasumsikan koneksi SQL Editor bernama `postgres` otomatis memiliki atribut superuser. Verifikasi `rolsuper` untuk role eksekutor terlebih dahulu. Jika bukan superuser, hentikan prosedur dan minta DBA dengan kewenangan yang sesuai.
-5. **Least privilege:** `sireader_view_owner` harus berakhir tanpa `CREATE` pada schema `public`. Jalur superuser di bawah tidak memerlukan grant CREATE sementara.
+**Prinsip prosedur:**
+1. \`sireader_view_owner\` adalah role \`NOLOGIN\`, \`NOSUPERUSER\`, \`NOBYPASSRLS\`, dan \`NOINHERIT\`.
+2. Role eksekutor adalah sesi DBA \`postgres\` yang memiliki hak yang cukup untuk memberikan membership sementara kepada dirinya sendiri dan mengubah ownership atas keenam view.
+3. \`CREATE\` pada schema \`public\` hanya diberikan sementara kepada \`sireader_view_owner\` untuk menyelesaikan perpindahan ownership.
+4. Membership \`sireader_view_owner\` kepada role \`postgres\` diberikan dengan \`SET TRUE, INHERIT FALSE\`, sehingga role \`postgres\` dapat melakukan \`SET ROLE\` ke owner tanpa mewarisi privilege owner secara otomatis.
+5. Membership sementara yang dibuat oleh sesi \`postgres\` dicabut setelah perpindahan. Jangan mencabut membership platform Supabase yang diberikan oleh \`supabase_admin\` atau grantor lain.
+6. Hak \`CREATE\` sementara dicabut setelah perpindahan. Target akhirnya \`has_schema_privilege('sireader_view_owner', 'public', 'CREATE') = false\`.
+7. Seluruh proses harus dijalankan di jendela pemeliharaan dan dengan rencana rollback. Jangan jalankan jika ownership objek, grantor membership, hak eksekutor, atau versi PostgreSQL tidak cocok.
 
-**Prosedur ownership transfer yang ditetapkan (DESAIN ONLY — JANGAN DIEKSEKUSI SEBELUM APPROVAL):**
+**Prosedur Supabase Hosted (DESAIN ONLY — JANGAN DIEKSEKUSI TANPA APPROVAL DBA):**
 
-```sql
--- LANGKAH 0: Verifikasi role eksekutor saat ini benar-benar superuser.
-SELECT current_user, r.rolsuper
-FROM pg_roles r
-WHERE r.rolname = current_user;
--- Prasyarat: rolsuper = true. Jika false / tidak ada baris: STOP.
+\`\`\`sql
+-- LANGKAH 0: preflight versi PostgreSQL dan identitas sesi.
+SHOW server_version_num;
+SELECT session_user, current_user;
 
--- LANGKAH 1: DBA superuser membuat keenam View di schema public
--- menggunakan DDL pada Bagian 3.1.
+-- WITH SET / INHERIT membership options membutuhkan PostgreSQL 16+.
+-- Jika server_version_num < 160000, STOP dan minta DBA menyiapkan prosedur
+-- kompatibel versi yang telah direview. Jangan mengganti sintaks secara spontan.
 
--- LANGKAH 2: Pindahkan ownership. Jalur superuser tidak memerlukan
--- GRANT CREATE ON SCHEMA public kepada sireader_view_owner.
+-- Pastikan keenam view sudah dibuat oleh role yang menjadi owner saat ini.
+-- Pastikan sireader_view_owner sudah dibuat sebagai NOLOGIN/NOSUPERUSER/
+-- NOCREATEDB/NOCREATEROLE/NOREPLICATION/NOBYPASSRLS/NOINHERIT.
+
+-- LANGKAH 1: Rekam membership yang sudah ada sebelum perubahan.
+-- Jangan menghapus membership yang dibuat Supabase/supabase_admin.
+SELECT
+    member_role.rolname AS member_name,
+    granted_role.rolname AS granted_role,
+    grantor_role.rolname AS grantor,
+    am.admin_option,
+    am.inherit_option,
+    am.set_option
+FROM pg_auth_members am
+JOIN pg_roles member_role ON member_role.oid = am.member
+JOIN pg_roles granted_role ON granted_role.oid = am.roleid
+JOIN pg_roles grantor_role ON grantor_role.oid = am.grantor
+WHERE member_role.rolname = 'postgres'
+  AND granted_role.rolname = 'sireader_view_owner';
+
+-- LANGKAH 2: Berikan CREATE sementara pada schema public kepada view owner.
+GRANT CREATE ON SCHEMA public TO sireader_view_owner;
+
+-- LANGKAH 3: Berikan membership sementara agar role postgres dapat SET ROLE.
+GRANT sireader_view_owner TO postgres WITH SET TRUE, INHERIT FALSE;
+
+-- LANGKAH 4: Pindahkan ownership keenam view.
 ALTER VIEW public.v_api_system_runtime_state OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_telemetry_usage OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_active_in_flight_tasks OWNER TO sireader_view_owner;
@@ -415,12 +442,39 @@ ALTER VIEW public.v_api_queued_pending_messages OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_active_market_watches OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_audit_decisions OWNER TO sireader_view_owner;
 
--- LANGKAH 3: Verifikasi owner tidak memiliki CREATE permanen.
-SELECT has_schema_privilege('sireader_view_owner', 'public', 'CREATE') AS view_owner_has_create;
--- Target: false.
-```
+-- LANGKAH 5: Cabut hanya membership sementara yang diberikan sesi postgres.
+-- PostgreSQL/Supabase melacak grantor; REVOKE ini tidak boleh dipakai
+-- untuk mencoba menghapus membership platform yang diberikan role lain.
+REVOKE sireader_view_owner FROM postgres;
 
-**Fallback non-superuser (bukan jalur default):** hanya boleh digunakan jika DBA menyetujuinya secara eksplisit. Eksekutor harus memenuhi syarat ownership/membership PostgreSQL; calon owner harus diberi `CREATE` pada schema sebelum transfer; privilege tersebut harus dicabut segera setelah seluruh transfer berhasil. Setelah itu verifikasi `has_schema_privilege(..., 'CREATE') = false`. Jika membership, ownership, atau rollback tidak dapat dipastikan, jangan gunakan fallback.
+-- LANGKAH 6: Cabut CREATE sementara.
+REVOKE CREATE ON SCHEMA public FROM sireader_view_owner;
+
+-- LANGKAH 7: Verifikasi hasil akhir. Semua target harus terpenuhi.
+SELECT has_schema_privilege('sireader_view_owner', 'public', 'CREATE')
+       AS view_owner_has_create;
+-- Target: false.
+
+SELECT
+    c.relname AS view_name,
+    owner_role.rolname AS view_owner
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_roles owner_role ON owner_role.oid = c.relowner
+WHERE n.nspname = 'public'
+  AND c.relkind = 'v'
+  AND c.relname IN (
+      'v_api_system_runtime_state', 'v_api_telemetry_usage',
+      'v_api_active_in_flight_tasks', 'v_api_queued_pending_messages',
+      'v_api_active_market_watches', 'v_api_audit_decisions'
+  )
+ORDER BY c.relname;
+-- Target: tepat enam baris, semuanya dimiliki sireader_view_owner.
+\`\`\`
+
+**Catatan grantor dan pemulihan:** Supabase dapat memiliki membership bawaan \`supabase_admin -> postgres\` atau membership platform lain. Sebelum prosedur, simpan hasil preflight membership. Setelah \`REVOKE sireader_view_owner FROM postgres\`, query \`pg_auth_members\` ulang dan pastikan tidak ada membership SET TRUE sementara dari grantor sesi \`postgres\`; membership platform yang sebelumnya ada harus tetap seperti semula. Jika sesi tidak memiliki kemampuan mengelola membership atau perubahan tidak tercatat dengan grantor yang diharapkan, hentikan proses dan eskalasi ke Supabase DBA. Jangan menggunakan \`CASCADE\` untuk mengatasi kegagalan.
+
+**Fallback superuser:** Bila role eksekutor benar-benar \`rolsuper = true\`, PostgreSQL mengizinkan transfer ownership tanpa membership dan tanpa grant \`CREATE\` sementara kepada calon owner. Jalur ini hanya boleh dipakai setelah atribut superuser diverifikasi; jangan mengasumsikan role bernama \`postgres\` pasti superuser.
 
 #### C. Pengaruh Row-Level Security (RLS) terhadap View Owner Non-Superuser
 - Karena `sireader_view_owner` berstatus **`NOSUPERUSER` dan `NOBYPASSRLS`**, PostgreSQL **sepenuhnya menegakkan kebijakan RLS pada tabel dasar terhadap `sireader_view_owner`**.
@@ -904,6 +958,8 @@ class ModelTelemetryDTO(BaseModel):
     currency: str = Field(description="IDR atau USD")
     requests: int = Field(default=0)
     cost: Decimal = Field(description="Biaya aktual (sesuai currency)")
+    reserved: Decimal = Field(description="Biaya reservasi (sesuai currency)")
+    projected: Decimal = Field(description="Biaya aktual + reservasi, sesuai currency")
     tokens: TokenBreakdownDTO = Field(description="Rincian token")
 
 class TelemetryUsageResponse(BaseModel):
@@ -935,6 +991,10 @@ from pydantic import BaseModel, Field
 class InFlightAnalysisDTO(BaseModel):
     task_id: int = Field(description="Surrogate identifier untuk task aktif (React list key - Accepted Debt)")
     status: Literal["PROCESSING"] = Field(default="PROCESSING")
+    liveness_status: Literal["IN_FLIGHT_UNCONFIRMED"] = Field(
+        default="IN_FLIGHT_UNCONFIRMED",
+        description="Record PROCESSING ditemukan; bukan bukti worker OS aktif.",
+    )
     created_at: datetime = Field(description="Waktu task mulai dicatat di database (UTC)")
     elapsed_seconds: float = Field(description="Usia keberadaan record dalam detik (bukan heartbeat liveness)")
 
@@ -1045,8 +1105,10 @@ Audit terhadap fungsi verifikasi token di [`app/api/security.py`](file:///C:/SIR
 def verify_api_token(provided_token: str | None, expected_token: str) -> bool:
     if not provided_token or not expected_token:
         return False
-    return secrets.compare_digest(provided_token.strip(), expected_token.strip())
+    return secrets.compare_digest(provided_token, expected_token)
 ```
+
+Secret server dapat dinormalisasi satu kali ketika dimuat dari environment. Kredensial request `provided_token` tidak boleh diubah dengan `.strip()`.
 
 ### Temuan Kritis & Instruksi Perbaikan:
 1. **Normalisasi Token Server:** `expected_token` yang dimuat dari variabel environment `.env` boleh dinormalisasi via `.strip()` saat inisialisasi di `api_settings.get_api_auth_token()` untuk mencegah trailing newline atau whitespace file.
@@ -1113,7 +1175,7 @@ Dokumen ini menyelaraskan kembali interpretasi status aktivitas dengan **Phase 3
 |---|---|---|---|---|
 | `GET /api/v1/system/status` | `v_api_system_runtime_state` | `runtime_control_state` | `execution_mode`, `trading_mode`, `auto_execution_enabled`, `auto_paused`, `updated_at` | `id` (internal singleton PK), `updated_by` (ID Telegram operator) |
 | `GET /api/v1/telemetry/usage` | `v_api_telemetry_usage` | `ai_usage_logs` | `usage_date`, `provider`, `model`, `tier`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `thinking_tokens`, `billing_currency`, `cost_rp`, `reserved_rp`, `cost_usd`, `reserved_usd`, `status`, `created_at`, `completed_at` | `id`, `request_id`, `analysis_log_id`, `error_message`, `cache_write_5m_tokens`, `cache_write_1h_tokens`, `cache_ttl_estimated` |
-| `GET /api/v1/pipeline/active` | `v_api_active_in_flight_tasks` & `v_api_queued_pending_messages` | `ai_analysis_logs` & `ai_pending_messages` | **In-flight:** `task_id` (accepted debt), `status`, `created_at`, `elapsed_seconds`.<br>**Queued:** `queue_item_id` (accepted debt), `status`, `queue_reason` (allowlisted), `attempts`, `claimed_at`, `created_at`, `updated_at` | `chat_id`, `target_message_id`, `result_json`, `error_message`, `has_checkpoint` (fiktif), `dedup_key`, `telegram_message_id`, `analysis_log_id`, `claimed_by`, `last_error`, `next_attempt_at` |
+| `GET /api/v1/pipeline/active` | `v_api_active_in_flight_tasks` & `v_api_queued_pending_messages` | `ai_analysis_logs` & `ai_pending_messages` | **In-flight:** `task_id` (accepted debt), `status`, `liveness_status=IN_FLIGHT_UNCONFIRMED`, `created_at`, `elapsed_seconds`.<br>**Queued:** `queue_item_id` (accepted debt), `status`, `queue_reason` (allowlisted), `attempts`, `claimed_at`, `created_at`, `updated_at` | `chat_id`, `target_message_id`, `result_json`, `error_message`, `has_checkpoint` (fiktif), `dedup_key`, `telegram_message_id`, `analysis_log_id`, `claimed_by`, `last_error`, `next_attempt_at` |
 | `GET /api/v1/market-watches/active` | `v_api_active_market_watches` | `trade_decision_watches` | `watch_id` (accepted debt), `symbol`, `status`, `spread_pips`, `maximum_spread_pips`, `last_bid`, `last_ask`, `check_count`, `last_checked_at`, `next_check_at`, `created_at`, `updated_at` | `analysis_log_id`, `trade_episode_id`, `broker_server`, `last_reason`, `resolved_at` |
 | `GET /api/v1/audit/decisions` | `v_api_audit_decisions` | `approval_decisions` | `audit_id` (accepted debt), `decision`, `previous_status`, `new_status`, `reviewer_role`, `decided_at` | `analysis_log_id` (internal FK disensor), `reviewer` (Telegram Username/ID), `note` (Catatan internal disensor penuh dari View) |
 
@@ -1198,34 +1260,34 @@ Argon wajib mengimplementasikan pengujian komprehensif di `tests/api/test_endpoi
 +-----------------------------------------------------------------------------------+
 |                   URUTAN LANGKAH IMPLEMENTASI BATCH 2 (ARGON)                     |
 +-----------------------------------------------------------------------------------+
-| Langkah 1: Perbarui verify_api_token() di app/api/security.py                     |
+| Langkah 1: Selesaikan exact token comparison di app/api/security.py               |
 |            - Terapkan exact constant-time comparison tanpa strip(provided_token)  |
 |            - Update unit test di tests/api/test_security.py                       |
 +-----------------------------------------------------------------------------------+
-| Langkah 2: Buat model View SQLAlchemy di app/api/views.py                         |
+| Langkah 2: Definisikan mapping enam approved views di app/api/views.py            |
 |            - Deklarasikan objek Table untuk ke-6 View database:                    |
 |              v_api_system_runtime_state, v_api_telemetry_usage,                    |
 |              v_api_active_in_flight_tasks, v_api_queued_pending_messages,         |
 |              v_api_active_market_watches, v_api_audit_decisions.                  |
 +-----------------------------------------------------------------------------------+
-| Langkah 3: Buat modul DTO Pydantic di app/api/schemas.py                          |
+| Langkah 3: Definisikan DTO response di app/api/schemas.py                         |
 |            - Definisikan SystemStatusResponse, TelemetryUsageResponse,            |
 |              ActivePipelineResponse, ActiveMarketWatchesResponse,                 |
 |              AuditDecisionsResponse beserta sub-modelnya.                         |
 +-----------------------------------------------------------------------------------+
-| Langkah 4: Buat route handlers di app/api/routes/                                 |
+| Langkah 4: Implementasikan lima GET route di app/api/routes/                      |
 |            - status.py, telemetry.py, pipeline.py, market_watches.py, audit.py    |
 |            - Gunakan sync 'def' handler, Depends(get_ro_session),                 |
 |              dan kueri HANYA terhadap v_api_* views dari app/api/views.py.        |
 +-----------------------------------------------------------------------------------+
-| Langkah 5: Buat application factory di app/api/server.py                          |
+| Langkah 5: Buat application factory dan entry point app/api/server.py            |
 |            - Inisialisasi FastAPI(docs_url="/docs", redoc_url=None)               |
 |            - Pasang CORSMiddleware berdasarkan api_settings.cors_origins_list      |
 |            - Daftarkan ke-5 router terproteksi verify_bearer_token                |
 |            - Pastikan startup Uvicorn mengikat HANYA ke host "127.0.0.1"          |
 |              dan dilarang default ke "0.0.0.0"                                    |
 +-----------------------------------------------------------------------------------+
-| Langkah 6: Tulis test suite komprehensif di tests/api/test_endpoints.py           |
+| Langkah 6: Lengkapi tests/api/test_endpoints.py dan CI workflow                   |
 |            - Uji kelima endpoint dengan TestClient dan mock session               |
 |            - Pastikan 100% test passing                                           |
 +-----------------------------------------------------------------------------------+
@@ -1235,5 +1297,26 @@ Argon wajib mengimplementasikan pengujian komprehensif di `tests/api/test_endpoi
 +-----------------------------------------------------------------------------------+
 ```
 
+## 12. Catatan Sinkronisasi Implementasi Batch 2
+
+Commit implementasi Batch 2 pada branch `phase-3-1-api-gateway` menambahkan modul berikut:
+- `app/api/views.py`: enam SQLAlchemy Core view mappings.
+- `app/api/schemas.py`: Pydantic DTO response.
+- `app/api/routes/{system,telemetry,pipeline,market_watches,audit}.py`: lima endpoint GET.
+- `app/api/server.py`: FastAPI factory, lifecycle, CORS, exception handling, dan local bind guard.
+- `tests/api/test_endpoints.py`: pengujian endpoint dengan SQLite stand-in.
+- `tests/api/test_security.py`: pengujian exact token comparison.
+- `.github/workflows/api-gateway-tests.yml`: otomatisasi API tests dan core regression.
+
+**Sinkronisasi kontrak yang wajib dipertahankan:**
+1. `ModelTelemetryDTO` memuat `cost`, `reserved`, dan `projected` per currency.
+2. `InFlightAnalysisDTO` memuat `liveness_status = IN_FLIGHT_UNCONFIRMED`. Field tersebut tidak menyatakan worker OS aktif.
+3. Uji SQLite hanya menguji kontrak aplikasi dan bukan bukti privilege PostgreSQL, view ownership, RLS, atau keberhasilan pada Supabase.
+4. GitHub Actions harus menunjukkan run yang sukses untuk commit terkait sebelum status automated tests dinyatakan lulus.
+5. API server lokal wajib dijalankan melalui entry point `python -m app.api.server`, yang menolak `API_HOST` selain `127.0.0.1`. Deployment BFF remote/private network membutuhkan desain dan review jaringan terpisah.
+
+**Kriteria belum terpenuhi:** belum ada bukti empiris dari instance Supabase aktual untuk membership/ownership transfer, privilege efektif, RLS policies, dan SELECT pada keenam views menggunakan role `sireader_api_ro`. Karena itu implementasi aplikasi yang tersedia belum berarti database gateway sudah dapat dipakai pada lingkungan Supabase.
+
+---
 ---
 *Dokumen ini berstatus PENDING EMPIRICAL VERIFICATION dan belum disahkan sebagai implementation-ready sebelum pengujian empiris pada Supabase selesai diverifikasi.*
