@@ -1,0 +1,48 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+*.pem
+*.key
+
+# Virtual Environment & Packages
+.venv/
+venv/
+ENV/
+env/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & Diagnostics
+logs/
+*.log
+profile.log
+
+# Databases & Local Sessions
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.session
+*.session-journal
+
+# Backup, Temp & Archive Files
+*.bak
+*.bak_*
+*.zip
+*.tar.gz
+*.disabled
+
+# Virtual Office UI Guidelines & Docs (Maintained in Virtual Office Repo)
+office-ui/

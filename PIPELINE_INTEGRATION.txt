@@ -1,0 +1,51 @@
+INTEGRASI app/ai/pipeline.py
+
+1. Tambahkan import ini bersama import modul aplikasi lainnya:
+
+from app.signals.decision_service import (
+    evaluate_pipeline_decision,
+    map_decision_to_analysis_status,
+)
+
+2. Dalam process_telegram_message(), cari akhir blok try/except AI Router,
+   tepat setelah blok berikut selesai:
+
+    except Exception as error:
+        finish_analysis_log(...)
+        return {...}
+
+   Letakkan blok di bawah ini SEBELUM bagian:
+
+    # 6. SIMPAN HASIL AKHIR
+
+    # --------------------------------------------------------
+    # 5B. DETERMINISTIC DECISION ENGINE
+    # --------------------------------------------------------
+
+    if final_status == "ANALYZED":
+        try:
+            decision = evaluate_pipeline_decision(
+                result,
+                bundle=bundle,
+                analysis_log_id=log_id,
+                session_factory=SessionLocal,
+            )
+        except Exception as error:
+            decision = {
+                "status": "NEEDS_REVIEW",
+                "reason": "DECISION_EVALUATION_FAILED",
+                "error_type": type(error).__name__,
+                "order_sent": False,
+            }
+
+        result["decision"] = decision
+        final_status = map_decision_to_analysis_status(decision)
+
+3. Jangan mengubah finish_analysis_log() yang sudah ada. Biarkan fungsi ini
+   menyimpan `result` lengkap, termasuk sibling key `decision`.
+
+4. Jangan ubah urutan persistent episode synchronization yang saat ini
+   berada sebelum AI Router. Jangan menghapus checkpoint, retry, billing,
+   deduplication, atau outbox.
+
+5. Jangan menambahkan order_send, CTrade, atau pemanggilan eksekusi MT5.
