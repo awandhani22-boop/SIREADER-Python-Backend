@@ -420,3 +420,41 @@ def test_postgres_readonly_transaction_rejects_mutation(postgres_security_engine
                 "VALUES (99, 'APPROVAL', 'DRY_RUN', false, true, now())"
             ))
         connection.rollback()
+
+
+def test_postgres_privilege_audit_detects_public_table_and_column_grants(postgres_security_engine):
+    # Granting SELECT on an approved view to PUBLIC must be detected even though
+    # the API login already has its own explicit SELECT grant.
+    with postgres_security_engine.begin() as admin:
+        admin.exec_driver_sql(
+            "GRANT SELECT ON public.v_api_system_runtime_state TO PUBLIC"
+        )
+    try:
+        with postgres_security_engine.connect() as api:
+            api.exec_driver_sql("SET ROLE sireader_api_ro")
+            api.exec_driver_sql("SET TRANSACTION READ ONLY")
+            snapshot = api.execute(text(PRIVILEGE_AUDIT_SQL)).mappings().one()
+            assert snapshot["public_table_grants"] is True
+    finally:
+        with postgres_security_engine.begin() as admin:
+            admin.exec_driver_sql(
+                "REVOKE SELECT ON public.v_api_system_runtime_state FROM PUBLIC"
+            )
+
+    # A PUBLIC column grant on a sensitive base-table column must be detected.
+    with postgres_security_engine.begin() as admin:
+        admin.exec_driver_sql(
+            "GRANT SELECT (chat_id) ON public.ai_analysis_logs TO PUBLIC"
+        )
+    try:
+        with postgres_security_engine.connect() as api:
+            api.exec_driver_sql("SET ROLE sireader_api_ro")
+            api.exec_driver_sql("SET TRANSACTION READ ONLY")
+            snapshot = api.execute(text(PRIVILEGE_AUDIT_SQL)).mappings().one()
+            assert snapshot["public_column_grants"] is True
+            assert snapshot["api_base_column_access"] is True
+    finally:
+        with postgres_security_engine.begin() as admin:
+            admin.exec_driver_sql(
+                "REVOKE SELECT (chat_id) ON public.ai_analysis_logs FROM PUBLIC"
+            )
