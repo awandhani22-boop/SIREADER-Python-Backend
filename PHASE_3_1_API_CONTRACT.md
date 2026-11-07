@@ -26,6 +26,8 @@ Sesuai ketetapan *Phase 3.0 Architecture Freeze*, batasan berikut bersifat mutla
 6. **Koneksi Database Read-Only Terisolasi:** API Gateway hanya menggunakan koneksi `SIREADER_API_DATABASE_URL` dengan role PostgreSQL `sireader_api_ro`. Dilarang keras menggunakan fallback ke `DATABASE_URL` utama.
 7. **Isolasi Akses Database Melalui Views (Zero Base Table SELECT):** Route handler API Gateway **dilarang mengeksekusi kueri langsung terhadap tabel dasar**. Seluruh pembacaan data wajib dilakukan melalui **6 SQL View** yang disetujui (`v_api_*`). Role `sireader_api_ro` tidak diberikan izin `SELECT` pada tabel dasar.
 8. **Bebas Data Sintetis & Penipuan Status:** API dilarang mengarang nilai konfigurasi (misal mengklaim `auto_paused=False` jika tabel kosong) dan dilarang memalsukan status *heartbeat* worker OS jika faktanya belum ada mekanisme denyut nadi periodik.
+9. **Topologi Jaringan Terisolasi & Host Binding (Strict 127.0.0.1):** Uvicorn pada deployment lokal wajib melakukan bind secara ketat ke loopback IP `127.0.0.1`, dilarang keras mengikat ke `0.0.0.0`. API Gateway dilarang diekspos secara langsung ke internet publik. Apabila API Gateway diakses oleh Backend-for-Frontend (BFF) atau service internal lain pada host terpisah, komunikasi wajib dilewatkan melalui jaringan privat (*private network* / VPC) dengan aturan firewall ingress yang ketat. Binding ke `127.0.0.1` tidak boleh diklaim secara sepihak otomatis melindungi API apabila deployment menggunakan reverse proxy yang meneruskan trafik luar tanpa filtrasi dan autentikasi.
+10. **Kerahasiaan Keras Token Bearer (Zero Frontend Leakage):** Nilai `SIREADER_API_AUTH_TOKEN` adalah rahasia server-to-server. Token dilarang keras dimasukkan ke dalam bundel JavaScript frontend (misalnya environment Vite, SPA bundle, atau browser storage) yang dapat diekstraksi oleh pengguna akhir.
 
 ---
 
@@ -273,7 +275,7 @@ Sesuai arahan arsitektur, dokumen ini secara tegas **TIDAK MENGKLAIM** bahwa men
 
 Aliasing kolom tetap mengekspos integer sequence asli dari database yang secara teori memungkinkan *enumeration attack* (penghitungan volume transaksi).
 
-#### A. Evaluasi Dua Strategi Identifier
+#### A. Evaluasi Dua Strategi Identifier & Batasan Jaringan Keras
 
 ```text
 +----------------------------------------------------------------------------------------------------+
@@ -285,21 +287,34 @@ Aliasing kolom tetap mengekspos integer sequence asli dari database yang secara 
 |                                     | - Konsekuensi Teknis: Membutuhkan encoding/decoding di layer |
 |                                     |   API, atau ekstensi pgcrypto di Supabase. Menambah          |
 |                                     |   kompleksitas kueri pagination berbasis kursor.             |
+|                                     | - Status: PRASYARAT MUTLAK apabila API dibuka untuk          |
+|                                     |   multi-user, akses publik eksternal, atau browser publik.   |
 +-------------------------------------+--------------------------------------------------------------+
 | 2. Strategi Integer Surrogate ID    | Mempertahankan primary key integer sebagai ID publik         |
 |    (Phase 3.1 Accepted Risk)        | ('task_id', 'watch_id', 'audit_id', 'queue_item_id').        |
 |                                     | - Klasifikasi: ACCEPTED TECHNICAL DEBT (RISIKO DITERIMA).    |
-|                                     | - Justifikasi & Mitigasi:                                    |
-|                                     |   a. API Gateway Phase 3.1 beroperasi murni pada localhost/  |
-|                                     |      private loopback BFF dengan Bearer token pre-shared.    |
-|                                     |   b. Tidak ada akses pengguna publik atau multi-tenant.      |
-|                                     |   c. Hubungan antar tabel (FK analysis_log_id, episode_id)   |
-|                                     |      TELAH DISENSOR TOTAL, sehingga enumerasi relasi silang  |
-|                                     |      tidak dapat dilakukan.                                  |
-|                                     |   d. Memungkinkan pagination kursor deterministik sederhana: |
-|                                     |      WHERE id < :cursor_id ORDER BY id DESC.                 |
+|                                     | - Batasan & Prasyarat Mutlak Penerimaan Risiko:              |
+|                                     |   a. Network Boundary: API Gateway HANYA bind ke 127.0.0.1   |
+|                                     |      (local loopback) atau private network/VPC terisolasi.   |
+|                                     |   b. Zero Direct Internet Exposure: Dilarang diekspos        |
+|                                     |      langsung ke internet publik.                             |
+|                                     |   c. Mandatory Pre-Shared Bearer Token: Akses selalu         |
+|                                     |      diautentikasi ketat server-to-server.                   |
+|                                     |   d. Zero Frontend Leakage: Token tidak pernah dibundel ke   |
+|                                     |      frontend Vite/browser.                                  |
+|                                     |   e. Foreign Key Stripping: Hubungan silang antar tabel      |
+|                                     |      (FK analysis_log_id, episode_id) DISENSOR TOTAL.        |
+|                                     |   f. Pagination Kursor Deterministik: Memungkinkan           |
+|                                     |      WHERE id < :cursor_id ORDER BY id DESC sederhana.       |
+|                                     | - Trigger Evaluasi Ulang: Jika API dibuka untuk multi-user   |
+|                                     |   atau akses publik, accepted risk ini BATAL dan wajib       |
+|                                     |   dimigrasi ke Strategi 1 (Opaque Public ID).                |
 +-------------------------------------+--------------------------------------------------------------+
 ```
+
+> [!WARNING]
+> **PERINGATAN PEMBATASAN JARINGAN & ACCEPTED RISK IDENTIFIER:**
+> Keputusan menerima integer sequence ID sebagai `task_id`, `watch_id`, `queue_item_id`, dan `audit_id` **HANYA BERLAKU** di bawah batasan jaringan privat terisolasi (`127.0.0.1` atau VPC terproteksi firewall) dengan proteksi Bearer token rahasia antar-backend. Binding ke `127.0.0.1` tidak secara ajaib menjamin keamanan jika reverse proxy atau gateway perantara mengarahkan request tanpa autentikasi. Apabila Virtual Office atau API Gateway di masa mendatang mendukung *multi-tenancy*, *user login*, atau diekspos ke jaringan publik, risiko enumerasi ini **WAJIB DIEVALUASI ULANG SECARA MENYELURUH** dan penerapan *Opaque Public Identifiers* menjadi prasyarat rilis yang tidak dapat ditawar.
 
 #### B. Matriks Klasifikasi Identifier Phase 3.1
 
@@ -308,20 +323,20 @@ Aliasing kolom tetap mengekspos integer sequence asli dari database yang secara 
 | `v_api_system_runtime_state` | `runtime_control_state.id` | *Dihapus Total* | **ZERO EXPOSURE** | Singleton record. UI tidak membutuhkan ID baris kontrol. |
 | `v_api_telemetry_usage` | `ai_usage_logs.id` | *Dihapus Total* | **ZERO EXPOSURE** | Data telemetri agregasi. ID baris tidak memiliki nilai observasi. |
 | `v_api_telemetry_usage` | `request_id`, `analysis_log_id` | *Dihapus Total* | **ZERO EXPOSURE** | ID tracking provider dan foreign key internal disensor total. |
-| `v_api_active_in_flight_tasks`| `ai_analysis_logs.id` | `task_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan oleh Virtual Office / Three.js sebagai React `key` unik per item in-flight. |
+| `v_api_active_in_flight_tasks`| `ai_analysis_logs.id` | `task_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan oleh Virtual Office / Three.js sebagai React `key` unik per item in-flight pada private loopback. |
 | `v_api_active_in_flight_tasks`| `chat_id`, `target_message_id`| *Dihapus Total* | **ZERO EXPOSURE** | Identitas privat Telegram mentor dan channel disensor penuh. |
-| `v_api_queued_pending_messages`| `ai_pending_messages.id`| `queue_item_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan oleh Virtual Office untuk render daftar antrean pending. |
+| `v_api_queued_pending_messages`| `ai_pending_messages.id`| `queue_item_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan oleh Virtual Office untuk render daftar antrean pending pada private loopback. |
 | `v_api_queued_pending_messages`| `dedup_key`, `telegram_message_id`| *Dihapus Total* | **ZERO EXPOSURE** | Identitas pesan sumber dan foreign key internal disensor penuh. |
 | `v_api_active_market_watches` | `trade_decision_watches.id` | `watch_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan untuk identitas radar pemantau spread aktif pada workstation. |
 | `v_api_active_market_watches` | `analysis_log_id`, `trade_episode_id` | *Dihapus Total* | **ZERO EXPOSURE** | Foreign key relasi internal yang membocorkan urutan tabel transaksional disensor total. |
-| `v_api_audit_decisions` | `approval_decisions.id` | `audit_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan untuk cursor pagination deterministik dan React list keying audit log. |
-| `v_api_audit_decisions` | `approval_decisions.analysis_log_id` | *Dihapus Total* | **ZERO EXPOSURE** | **Koreksi Kritis:** Menghubungkan audit approver ke ID internal analysis log dihapus total dari View dan DTO. |
+| `v_api_audit_decisions` | `approval_decisions.id` | `audit_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan untuk cursor pagination deterministik dan React list keying audit log pada private loopback. |
+| `v_api_audit_decisions` | `approval_decisions.analysis_log_id` | *Dihapus Total* | **ZERO EXPOSURE** | Menghubungkan audit approver ke ID internal analysis log dihapus total dari View dan DTO. |
 
 ---
 
 ### 3.3 Analisis & Prosedur Keamanan Role View (Role Security Hardening)
 
-#### A. Prosedur Pemberian Hak Akses Terbatas kepada `sireader_view_owner`
+#### A. Prosedur Pembuatan Role & Hak Akses Kolom (`sireader_view_owner`)
 1. `sireader_view_owner` adalah role internal `NOLOGIN` yang **bukan pemilik tabel dasar**:
    ```sql
    CREATE ROLE sireader_view_owner WITH
@@ -333,7 +348,7 @@ Aliasing kolom tetap mengekspos integer sequence asli dari database yang secara 
        NOBYPASSRLS
        NOINHERIT;
    ```
-2. Pemilik tabel dasar (`postgres` atau `supabase_admin`) mencabut seluruh privilege dan hanya memberikan `GRANT SELECT` pada kolom-kolom tertentu (*Column-Level Privileges*):
+2. Pemilik tabel dasar (`postgres` atau `supabase_admin`) mencabut seluruh privilege tabel dan hanya memberikan `GRANT SELECT` pada kolom-kolom tertentu (*Column-Level Privileges*):
    ```sql
    REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sireader_view_owner;
    GRANT USAGE ON SCHEMA public TO sireader_view_owner;
@@ -366,15 +381,46 @@ Aliasing kolom tetap mengekspos integer sequence asli dari database yang secara 
        ON public.approval_decisions TO sireader_view_owner;
    ```
 
-#### B. Prosedur Perpindahan Kepemilikan View
-Setelah keenam View dibuat di database oleh DBA, kepemilikannya dialihkan secara eksplisit ke `sireader_view_owner`:
+#### B. Audit Persyaratan PostgreSQL & Prosedur Perpindahan Kepemilikan View
+
+Pemeriksaan terhadap aturan internal engine PostgreSQL (`ATExecChangeOwner` pada `commands/tablecmds.c`) mengungkap aturan ketat mengenai perintah `ALTER VIEW ... OWNER TO new_owner`:
+
+1. **Kewenangan Eksekutor:** Role pengeksekusi perintah `ALTER VIEW ... OWNER TO` harus merupakan pemilik view saat ini atau `SUPERUSER`.
+2. **Kewenangan Terhadap Calon Pemilik:** Apabila pengeksekusi bukan superuser, ia wajib menjadi anggota (member) langsung atau tidak langsung dari role calon pemilik baru (`new_owner`). Superuser dapat melewati pemeriksaan keanggotaan ini.
+3. **Persyaratan Schema CREATE Privilege:** Engine PostgreSQL **mewajibkan calon pemilik baru (`new_owner`) memiliki hak `CREATE` pada skema tempat view berada**, sekalipun perintah perpindahan kepemilikan dijalankan oleh `superuser` (`postgres`). Tanpa hak ini, PostgreSQL menolak eksekusi dengan `ERROR: permission denied for schema <schema_name>`. Hal ini dirancang agar superuser tidak dapat menempatkan kepemilikan objek pada role yang dilarang membuat objek di skema terkait.
+4. **Resolusi Dilema Least Privilege:** Jika `sireader_view_owner` diberi `CREATE` permanen pada skema `public`, hal itu melanggar prinsip *least privilege* karena membuka celah pembuatan objek tak terkontrol. Sebaliknya, jika tidak diberi hak `CREATE`, perintah `ALTER VIEW ... OWNER TO` akan gagal.
+
+Oleh karena itu, DBA wajib menerapkan **Prosedur Transisi Kepemilikan 6 Langkah** yang aman, atomik, dan tervalidasi:
+
 ```sql
+-- LANGKAH 1: DBA (Superuser) membuat keenam View di skema public
+-- (DDL keenam view dijalankan sesuai Bagian 3.1)
+
+-- LANGKAH 2: Berikan hak CREATE SEMENTARA pada skema public kepada sireader_view_owner
+GRANT CREATE ON SCHEMA public TO sireader_view_owner;
+
+-- LANGKAH 3: Pindahkan kepemilikan keenam view kepada sireader_view_owner
 ALTER VIEW public.v_api_system_runtime_state OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_telemetry_usage OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_active_in_flight_tasks OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_queued_pending_messages OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_active_market_watches OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_audit_decisions OWNER TO sireader_view_owner;
+
+-- LANGKAH 4: SEGERA CABUT hak CREATE sementara tersebut dari sireader_view_owner
+REVOKE CREATE ON SCHEMA public FROM sireader_view_owner;
+
+-- LANGKAH 5: Verifikasi kepastian bahwa sireader_view_owner TIDAK memiliki hak CREATE permanen
+SELECT has_schema_privilege('sireader_view_owner', 'public', 'CREATE') AS view_owner_has_create;
+-- Target: WAJIB MENGEMBALIKAN FALSE!
+
+-- LANGKAH 6: Berikan hak SELECT pada keenam view kepada role sireader_api_ro
+GRANT SELECT ON public.v_api_system_runtime_state,
+                public.v_api_telemetry_usage,
+                public.v_api_active_in_flight_tasks,
+                public.v_api_queued_pending_messages,
+                public.v_api_active_market_watches,
+                public.v_api_audit_decisions TO sireader_api_ro;
 ```
 
 #### C. Pengaruh Row-Level Security (RLS) terhadap View Owner Non-Superuser
@@ -383,7 +429,7 @@ ALTER VIEW public.v_api_audit_decisions OWNER TO sireader_view_owner;
 - Hal ini merupakan keunggulan keamanan besar dibanding kepemilikan oleh superuser `postgres`, karena RLS tidak pernah dilewati secara diam-diam.
 
 #### D. Hak Akses Role API Gateway (`sireader_api_ro`)
-1. Role `sireader_api_ro` dibuat dengan hak login tetapi terkunci penuh:
+1. Role `sireader_api_ro` dibuat dengan hak login tetapi terkunci penuh tanpa hak waris (`NOINHERIT`):
    ```sql
    CREATE ROLE sireader_api_ro WITH
        LOGIN
@@ -409,72 +455,158 @@ ALTER VIEW public.v_api_audit_decisions OWNER TO sireader_view_owner;
    -- Pastikan tabel dasar sama sekali tidak bisa dibaca oleh sireader_api_ro
    REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sireader_api_ro;
    ```
+3. Kriteria Keamanan Akses:
+   - `sireader_api_ro` dilarang memiliki hak `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, maupun `TRIGGER` pada tabel dasar, baik di tingkat tabel (*table-level*) maupun tingkat kolom (*column-level*).
+   - Seluruh akses pembacaan data dilakukan murni melalui 6 view yang disetujui.
 
-#### E. Protokol Audit Lengkap Verifikasi Privilege Efektif (7-Step Protocol)
+#### E. Protokol Audit Lengkap Verifikasi Privilege Efektif (Comprehensive Effective Privilege Verification)
+
+##### 1. Pemahaman Kritis: Privilege Langsung (Direct Grants) vs Privilege Efektif (Effective Privileges)
+Dalam PostgreSQL, terdapat perbedaan fundamental antara hak akses yang tercatat langsung dengan hak akses efektif saat runtime:
+- **Direct Privileges (Hak Akses Langsung):** Baris pemberian hak yang tercatat eksplisit pada tabel katalog sistem (`information_schema.table_privileges` atau `information_schema.column_privileges`) dengan nama grantee role terkait. Kueri katalog ini hanya memeriksa penugasan langsung dan **tidak memperhitungkan pewarisan**.
+- **Effective Privileges (Hak Akses Efektif):** Hak akses aktual yang dievaluasi oleh engine PostgreSQL saat eksekusi kueri berjalan. Privilege efektif memperhitungkan:
+  1. Direct grants ke role.
+  2. Hak yang diwariskan dari pseudo-role `PUBLIC` (seluruh role otomatis mewarisi hak `PUBLIC`).
+  3. Hak yang diperoleh melalui keanggotaan role (*role membership*) dalam `pg_auth_members` apabila atribut `INHERIT` aktif.
+  4. Hak kepemilikan objek (*object ownership*).
+  5. Hak istimewa sistem (*system attributes* seperti `SUPERUSER` atau `BYPASSRLS`).
+
+Oleh karena itu, audit keamanan **TIDAK BOLEH HANYA MEMERIKSA `table_privileges`**. Audit wajib mengevaluasi fungsi runtime PostgreSQL:
+- `has_table_privilege(role, table, privilege)`
+- `has_column_privilege(role, table, column, privilege)`
+- `has_schema_privilege(role, schema, privilege)`
+
+##### 2. Protokol Verifikasi 8 Langkah (Wajib Dijalankan pada Supabase)
 > [!WARNING]
 > **PERINGATAN ARSITEKTUR KRITIS: STATUS DESAIN BELUM DIVERIFIKASI (UNVERIFIED HYPOTHESIS).**
-> Keamanan role dan view ini **DILARANG DINYATAKAN AMAN** sebelum seluruh 7 protokol audit empiris berikut dijalankan langsung pada instance Supabase riil dan hasilnya diverifikasi oleh DBA/Owner:
+> Seluruh skrip berikut merupakan protokol verifikasi desain. Keamanan role dan view ini **DILARANG DINYATAKAN SELESAI ATAU AMAN** sebelum seluruh 8 langkah audit empiris berikut dijalankan langsung pada instance Supabase PostgreSQL aktual dan diverifikasi oleh DBA/Owner:
 
 ```sql
--- 1. Verifikasi Atribut Role (pg_roles)
+-- ============================================================================
+-- LANGKAH 1: Verifikasi Atribut Role Sistem (pg_roles)
+-- ============================================================================
 SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls
 FROM pg_roles 
 WHERE rolname IN ('sireader_view_owner', 'sireader_api_ro');
--- Target: Keduanya harus FALSE untuk super, inherit, createrole, createdb, repl, bypassrls.
---         view_owner must have canlogin=false; api_ro must have canlogin=true.
+-- TARGET HASIL:
+-- sireader_view_owner : super=f, inherit=f, createrole=f, createdb=f, canlogin=f, repl=f, bypassrls=f
+-- sireader_api_ro     : super=f, inherit=f, createrole=f, createdb=f, canlogin=t, repl=f, bypassrls=f
 
--- 2. Verifikasi Isolasi Membership (pg_auth_members)
+-- ============================================================================
+-- LANGKAH 2: Verifikasi Isolasi Membership & Inheritance (pg_auth_members)
+-- ============================================================================
 SELECT r.rolname AS role_name, m.rolname AS member_of
 FROM pg_auth_members am
 JOIN pg_roles r ON am.member = r.oid
 JOIN pg_roles m ON am.roleid = m.oid
 WHERE r.rolname IN ('sireader_view_owner', 'sireader_api_ro');
--- Target: 0 baris (tidak ada keanggotaan ke postgres, authenticated, service_role, anon).
+-- TARGET HASIL: 0 baris (Tidak ada keanggotaan ke postgres, authenticated, service_role, anon).
 
--- 3. Verifikasi Hak Skema (Schema Privileges)
+-- ============================================================================
+-- LANGKAH 3: Verifikasi Hak Akses Skema Efektif (Schema Privileges)
+-- ============================================================================
 SELECT 
     has_schema_privilege('sireader_view_owner', 'public', 'USAGE') AS view_owner_usage,
     has_schema_privilege('sireader_view_owner', 'public', 'CREATE') AS view_owner_create,
     has_schema_privilege('sireader_api_ro', 'public', 'USAGE') AS api_ro_usage,
     has_schema_privilege('sireader_api_ro', 'public', 'CREATE') AS api_ro_create;
--- Target: USAGE = true, CREATE = false untuk kedua role.
+-- TARGET HASIL:
+-- view_owner_usage=true, view_owner_create=false
+-- api_ro_usage=true,     api_ro_create=false
 
--- 4. Verifikasi Pencabutan Hak Akses PUBLIC (PUBLIC Grants Audit)
+-- ============================================================================
+-- LANGKAH 4: Audit Kebocoran Privilege melalui Pseudo-Role PUBLIC
+-- ============================================================================
 SELECT table_name, privilege_type 
 FROM information_schema.table_privileges 
 WHERE grantee = 'PUBLIC' AND table_schema = 'public';
--- Target: Tidak ada izin SELECT/INSERT/UPDATE/DELETE default pada tabel/view aplikasi untuk PUBLIC.
+-- TARGET HASIL: 0 baris (Tidak ada hak SELECT/INSERT/UPDATE/DELETE default pada tabel/view aplikasi untuk PUBLIC).
 
--- 5. Verifikasi Hak Akses Tabel Dasar (Base Tables Access Check)
--- A. sireader_api_ro harus memiliki ZERO PRIVILEGES pada tabel dasar:
-SELECT table_name, privilege_type 
-FROM information_schema.table_privileges 
-WHERE grantee = 'sireader_api_ro' 
-  AND table_schema = 'public' 
-  AND table_name NOT LIKE 'v_api_%';
--- Target: 0 baris (tidak ada izin apapun pada tabel dasar).
+-- ============================================================================
+-- LANGKAH 5: Verifikasi PRIVILEGE EFEKTIF sireader_api_ro pada Base Tables
+-- ============================================================================
+-- 5A. Evaluasi Table-Level Effective Privilege pada Seluruh Base Tables
+SELECT 
+    t.table_name,
+    has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'SELECT') AS can_select,
+    has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'INSERT') AS can_insert,
+    has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'UPDATE') AS can_update,
+    has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'DELETE') AS can_delete
+FROM (
+    VALUES 
+        ('runtime_control_state'),
+        ('ai_usage_logs'),
+        ('ai_analysis_logs'),
+        ('ai_pending_messages'),
+        ('trade_decision_watches'),
+        ('approval_decisions')
+) AS t(table_name);
+-- TARGET HASIL: 6 baris dengan seluruh nilai boolean WAJIB FALSE!
 
--- B. sireader_view_owner hanya memiliki column-level privileges yang disetujui:
+-- 5B. Evaluasi Column-Level Effective Privilege pada Seluruh Kolom Base Tables
+SELECT 
+    c.table_name,
+    c.column_name,
+    has_column_privilege('sireader_api_ro', 'public.' || c.table_name, c.column_name, 'SELECT') AS can_select_column
+FROM information_schema.columns c
+WHERE c.table_schema = 'public' 
+  AND c.table_name IN (
+      'runtime_control_state', 'ai_usage_logs', 'ai_analysis_logs', 
+      'ai_pending_messages', 'trade_decision_watches', 'approval_decisions'
+  )
+  AND has_column_privilege('sireader_api_ro', 'public.' || c.table_name, c.column_name, 'SELECT') = true;
+-- TARGET HASIL: WAJIB 0 BARIS (Tidak ada satu kolom pun pada base tables yang dapat diakses).
+
+-- ============================================================================
+-- LANGKAH 6: Verifikasi Column-Level Privileges milik sireader_view_owner
+-- ============================================================================
 SELECT table_name, column_name, privilege_type 
 FROM information_schema.column_privileges 
-WHERE grantee = 'sireader_view_owner' AND table_schema = 'public';
--- Target: Hanya kolom yang di-allowlist pada DDL view. Tidak ada sender, chat_id, reviewer, note, dll.
+WHERE grantee = 'sireader_view_owner' AND table_schema = 'public'
+ORDER BY table_name, column_name;
+-- TARGET HASIL: Hanya kolom allowlist (misal id, status, created_at, dll).
+-- Kolom privat seperti sender, chat_id, reviewer, note, request_id TIDAK BOLEH ADA.
 
--- 6. Verifikasi Kepemilikan View & Hak Akses View
-SELECT v.table_name, v.view_owner, tp.grantee, tp.privilege_type
+-- ============================================================================
+-- LANGKAH 7: Verifikasi Kepemilikan View & Hak Akses View Efektif
+-- ============================================================================
+SELECT 
+    v.table_name AS view_name,
+    v.view_owner,
+    has_table_privilege('sireader_api_ro', 'public.' || v.table_name, 'SELECT') AS api_ro_can_select
 FROM information_schema.views v
-JOIN information_schema.table_privileges tp 
-  ON v.table_name = tp.table_name AND tp.table_schema = 'public'
 WHERE v.table_schema = 'public' AND v.table_name LIKE 'v_api_%'
-  AND tp.grantee = 'sireader_api_ro';
--- Target: Seluruh 6 view dimiliki sireader_view_owner dan grantee sireader_api_ro memiliki SELECT.
+ORDER BY v.table_name;
+-- TARGET HASIL: 6 baris, seluruh view_owner adalah 'sireader_view_owner', dan api_ro_can_select = true.
 
--- 7. Uji Penetrasi Query Langsung (Direct Penetration Simulation)
--- SET ROLE sireader_api_ro;
--- SELECT * FROM public.approval_decisions; -- WAJIB ERROR: permission denied for table approval_decisions
--- SELECT * FROM public.ai_analysis_logs;   -- WAJIB ERROR: permission denied for table ai_analysis_logs
--- SELECT * FROM public.v_api_audit_decisions; -- WAJIB SUKSES mengembalikan data tersanitasi
--- RESET ROLE;
+-- ============================================================================
+-- LANGKAH 8: Uji Simulasi Penetrasi Runtime Nyata (Direct Penetration Test)
+-- ============================================================================
+SET ROLE sireader_api_ro;
+
+-- Test 8A: Seluruh Kueri Langsung ke Base Tables WAJIB GAGAL (Error 42501)
+-- SELECT * FROM public.approval_decisions LIMIT 1;
+-- -> ERROR: 42501: permission denied for table approval_decisions
+-- SELECT * FROM public.ai_analysis_logs LIMIT 1;
+-- -> ERROR: 42501: permission denied for table ai_analysis_logs
+-- SELECT * FROM public.runtime_control_state LIMIT 1;
+-- -> ERROR: 42501: permission denied for table runtime_control_state
+-- SELECT * FROM public.ai_usage_logs LIMIT 1;
+-- -> ERROR: 42501: permission denied for table ai_usage_logs
+-- SELECT * FROM public.ai_pending_messages LIMIT 1;
+-- -> ERROR: 42501: permission denied for table ai_pending_messages
+-- SELECT * FROM public.trade_decision_watches LIMIT 1;
+-- -> ERROR: 42501: permission denied for table trade_decision_watches
+
+-- Test 8B: Seluruh Kueri ke Approved Views WAJIB SUKSES
+-- SELECT * FROM public.v_api_system_runtime_state;
+-- SELECT * FROM public.v_api_telemetry_usage LIMIT 5;
+-- SELECT * FROM public.v_api_active_in_flight_tasks;
+-- SELECT * FROM public.v_api_queued_pending_messages;
+-- SELECT * FROM public.v_api_active_market_watches;
+-- SELECT * FROM public.v_api_audit_decisions LIMIT 5;
+
+RESET ROLE;
 ```
 
 ---
@@ -951,18 +1083,22 @@ Dokumen ini menyelaraskan kembali interpretasi status aktivitas dengan **Phase 3
 
 ## 9. Security Acceptance Criteria
 
-Implementasi Batch 2 dinyatakan lulus kriteria keamanan jika memenuhi 10 kriteria mutlak:
+Implementasi Batch 2 dinyatakan lulus kriteria keamanan jika memenuhi 14 kriteria mutlak:
 
-1. **HTTP GET Only:** 100% endpoint beroperasi hanya dengan metode `GET`.
-2. **Bearer Token Mandatory:** Seluruh request tanpa header `Authorization: Bearer <token>` atau dengan token salah ditolak `HTTP 401 Unauthorized`.
-3. **Exact Token Comparison:** `verify_api_token()` menggunakan perbandingan waktu-konstan persis (`secrets.compare_digest(provided_token, expected_token)`) tanpa `.strip()` pada `provided_token`.
-4. **Zero Base Table SELECT:** Seluruh kueri dieksekusi HANYA pada 6 View (`v_api_*`). API Gateway tidak memiliki kueri yang membaca tabel dasar.
-5. **Zero Foreign Keys Exposed:** `analysis_log_id`, `trade_episode_id`, dan foreign key internal lainnya tidak diekspos di View audit maupun endpoint publik.
-6. **Separation of Currencies:** IDR dan USD dilaporkan terpisah tanpa penjumlahan lintas mata uang pada seluruh total, reservasi, dan model breakdown.
-7. **Asia/Jakarta Timezone Evaluation:** Evaluasi tanggal pemakaian token AI menggunakan zona waktu `Asia/Jakarta`.
-8. **Isolated Connection Pool:** API Gateway hanya menggunakan pool read-only (`pool_size=2, max_overflow=0`) dengan role `sireader_api_ro`.
-9. **Fail-Closed Configuration:** Jika `SIREADER_API_DATABASE_URL` atau `SIREADER_API_AUTH_TOKEN` kosong/tidak ada, aplikasi menolak beroperasi secara fail-closed.
-10. **Zero Fabrications:** Tidak ada konfigurasi sintetis, checkpoint fiktif, atau heartbeat worker yang dikarang dalam status respons.
+1. **HTTP GET Only:** 100% endpoint beroperasi hanya dengan metode `GET`. Dilarang menyediakan endpoint mutasi.
+2. **Bearer Token Mandatory (Fail-Closed):** Seluruh request tanpa header `Authorization: Bearer <token>` atau dengan token salah ditolak secara fail-closed dengan `HTTP 401 Unauthorized`.
+3. **Kerahasiaan Server-Side Token (Zero Frontend Leakage):** Bearer token adalah rahasia backend. Dilarang keras memasukkan atau membundel token ke dalam kode client-side (Vite, React bundle, atau storage browser).
+4. **Isolasi Host Binding (Strict 127.0.0.1):** Uvicorn pada deployment lokal wajib melakukan bind ke `127.0.0.1` dan dilarang mengikat ke `0.0.0.0`. Dilarang membuka API Gateway langsung ke internet publik.
+5. **Proteksi Jaringan Privat (Private Network Boundary):** Akses antar-service (misal dari Virtual Office BFF) wajib melalui jaringan privat / VPC terproteksi firewall. Binding `127.0.0.1` tidak diklaim otomatis aman jika reverse proxy meneruskan trafik tanpa filter.
+6. **Exact Token Comparison:** `verify_api_token()` menggunakan perbandingan waktu-konstan persis (`secrets.compare_digest(provided_token, expected_token)`) tanpa `.strip()` pada `provided_token`.
+7. **Zero Base Table SELECT (Effective Privilege Enforcement):** Seluruh kueri dieksekusi HANYA pada 6 View (`v_api_*`). Evaluasi runtime `has_table_privilege()` dan `has_column_privilege()` untuk `sireader_api_ro` pada seluruh base tables bernilai `false`.
+8. **Pencabutan Hak CREATE Sementara (View Owner Hardening):** `sireader_view_owner` memiliki status permanen `has_schema_privilege('sireader_view_owner', 'public', 'CREATE') = false` setelah pemindahan kepemilikan selesai.
+9. **Zero Foreign Keys Exposed:** `analysis_log_id`, `trade_episode_id`, dan foreign key internal lainnya tidak diekspos di View audit maupun endpoint publik.
+10. **Separation of Currencies:** IDR dan USD dilaporkan terpisah tanpa penjumlahan lintas mata uang pada seluruh total, reservasi, dan model breakdown.
+11. **Asia/Jakarta Timezone Evaluation:** Evaluasi tanggal pemakaian token AI menggunakan zona waktu `Asia/Jakarta`.
+12. **Isolated Connection Pool:** API Gateway hanya menggunakan pool read-only (`pool_size=2, max_overflow=0`) dengan role `sireader_api_ro`. Dilarang fallback ke pool utama.
+13. **Zero Fabrications:** Tidak ada konfigurasi sintetis, checkpoint fiktif, atau status heartbeat worker yang dikarang dalam status respons.
+14. **Trigger Evaluasi Ulang Integer Identifier:** Jika di masa mendatang sistem dibuka untuk multi-user atau akses publik langsung, accepted risk integer sequence ID wajib dievaluasi ulang dan migrasi ke *Opaque Public Identifiers* menjadi prasyarat mutlak.
 
 ---
 
@@ -974,11 +1110,13 @@ Argon wajib mengimplementasikan pengujian komprehensif di `tests/api/test_endpoi
 +------------------------------------+---------------------------------------------------------------+
 | KATEGORI TEST                      | SKENARIO UJI                                                  |
 +------------------------------------+---------------------------------------------------------------+
-| Autentikasi                        | 1. Request tanpa header Authorization -> 401                  |
+| Autentikasi & Jaringan             | 1. Request tanpa header Authorization -> 401                  |
 |                                    | 2. Request dengan scheme bukan Bearer (Basic) -> 401           |
 |                                    | 3. Request dengan token salah -> 401                          |
 |                                    | 4. Request dengan token ber-spasi tambahan -> 401              |
 |                                    | 5. Request dengan token exact match -> 200                    |
+|                                    | 6. Verifikasi server bind default ke 127.0.0.1 (bukan 0.0.0.0)|
+|                                    | 7. Verifikasi token rahasia tidak bocor ke output/bundle      |
 +------------------------------------+---------------------------------------------------------------+
 | System Status                      | 1. Sukses dengan data v_api_system_runtime_state valid -> 200  |
 |                                    | 2. View kosong -> 200, runtime_control = None                 |
@@ -1038,6 +1176,8 @@ Argon wajib mengimplementasikan pengujian komprehensif di `tests/api/test_endpoi
 |            - Inisialisasi FastAPI(docs_url="/docs", redoc_url=None)               |
 |            - Pasang CORSMiddleware berdasarkan api_settings.cors_origins_list      |
 |            - Daftarkan ke-5 router terproteksi verify_bearer_token                |
+|            - Pastikan startup Uvicorn mengikat HANYA ke host "127.0.0.1"          |
+|              dan dilarang default ke "0.0.0.0"                                    |
 +-----------------------------------------------------------------------------------+
 | Langkah 6: Tulis test suite komprehensif di tests/api/test_endpoints.py           |
 |            - Uji kelima endpoint dengan TestClient dan mock session               |
