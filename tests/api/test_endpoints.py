@@ -10,7 +10,12 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.config import api_settings
 from app.api.dependencies import get_ro_session
-from app.api.server import create_app, validate_local_bind_host, validate_ro_database_identity
+from app.api.server import (
+    create_app,
+    validate_local_bind_host,
+    validate_ro_database_identity,
+    validate_ro_database_privileges,
+)
 from app.api.views import (
     metadata,
     v_api_active_in_flight_tasks,
@@ -293,3 +298,50 @@ def test_database_identity_guard_accepts_dedicated_readonly_role():
 def test_database_identity_guard_rejects_missing_identity():
     with pytest.raises(RuntimeError):
         validate_ro_database_identity(None)
+
+
+def _safe_privilege_snapshot():
+    return {
+        "api_schema_usage": True,
+        "api_schema_create": False,
+        "api_has_role_memberships": False,
+        "api_base_table_access": False,
+        "api_base_column_access": False,
+        "owner_schema_create": False,
+        "owner_base_table_access": False,
+        "owner_column_allowlist_ok": True,
+        "approved_view_count": 6,
+        "approved_view_owners_ok": True,
+        "approved_view_select_ok": True,
+        "view_owner_attributes_ok": True,
+    }
+
+
+def test_database_privilege_guard_accepts_strict_view_only_boundary():
+    validate_ro_database_privileges(_safe_privilege_snapshot())
+
+
+@pytest.mark.parametrize("key,value", [
+    ("api_schema_usage", False),
+    ("api_schema_create", True),
+    ("api_has_role_memberships", True),
+    ("api_base_table_access", True),
+    ("api_base_column_access", True),
+    ("owner_schema_create", True),
+    ("owner_base_table_access", True),
+    ("owner_column_allowlist_ok", False),
+    ("approved_view_count", 5),
+    ("approved_view_owners_ok", False),
+    ("approved_view_select_ok", False),
+    ("view_owner_attributes_ok", False),
+])
+def test_database_privilege_guard_rejects_unsafe_boundary(key, value):
+    snapshot = _safe_privilege_snapshot()
+    snapshot[key] = value
+    with pytest.raises(RuntimeError):
+        validate_ro_database_privileges(snapshot)
+
+
+def test_database_privilege_guard_rejects_missing_snapshot():
+    with pytest.raises(RuntimeError):
+        validate_ro_database_privileges(None)
