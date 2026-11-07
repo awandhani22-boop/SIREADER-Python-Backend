@@ -319,8 +319,14 @@ SELECT
     has_schema_privilege(current_user, 'public', 'USAGE') AS api_schema_usage,
     has_schema_privilege(current_user, 'public', 'CREATE') AS api_schema_create,
     EXISTS (
-        SELECT 1 FROM pg_auth_members
-        WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        SELECT 1
+        FROM pg_auth_members am
+        WHERE (
+            am.member = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+            OR am.roleid = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        )
+          -- Ignore only the non-inheriting, non-SET creator admin linkage.
+          AND (am.inherit_option OR am.set_option)
     ) AS api_has_role_memberships,
     (SELECT has_any FROM api_view_write_access) AS api_view_write_access,
     (SELECT has_any FROM api_view_column_write_access) AS api_view_column_write_access,
@@ -385,7 +391,7 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
     if snapshot.get("api_view_column_write_access") is not False:
         raise RuntimeError("sireader_api_ro must not have column-level write privileges on approved views.")
     if snapshot.get("api_has_role_memberships") is not False:
-        raise RuntimeError("sireader_api_ro must not inherit or SET ROLE through memberships.")
+        raise RuntimeError("sireader_api_ro must not have memberships that grant INHERIT or SET ROLE.")
     if snapshot.get("api_base_table_access") is not False:
         raise RuntimeError("sireader_api_ro has an effective privilege on a protected base table.")
     if snapshot.get("api_base_table_maintain") is not False:
