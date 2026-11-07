@@ -167,11 +167,57 @@ owner_base_table_access AS (
     SELECT EXISTS (
         SELECT 1
         FROM base_tables b
+        CROSS JOIN table_privileges p
         WHERE has_table_privilege(
             'sireader_view_owner',
             format('public.%I', b.table_name),
-            'SELECT'
+            p.privilege_name
         )
+    ) AS has_any
+),
+owner_base_table_maintain_access AS (
+    SELECT CASE
+        WHEN current_setting('server_version_num')::integer >= 180000 THEN EXISTS (
+            SELECT 1
+            FROM base_tables b
+            WHERE has_table_privilege(
+                'sireader_view_owner',
+                format('public.%I', b.table_name),
+                'MAINTAIN'
+            )
+        )
+        ELSE FALSE
+    END AS has_any
+),
+owner_has_role_memberships AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_auth_members am
+        WHERE am.member = (SELECT oid FROM pg_roles WHERE rolname = 'sireader_view_owner')
+           OR am.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'sireader_view_owner')
+    ) AS has_any
+),
+owner_unapproved_column_access AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_class t
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = t.oid
+        CROSS JOIN column_privileges p
+        WHERE n.nspname = 'public'
+          AND t.relname IN (SELECT table_name FROM base_tables)
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND has_column_privilege('sireader_view_owner', t.oid, a.attnum, p.privilege_name)
+          AND NOT (
+              p.privilege_name = 'SELECT'
+              AND EXISTS (
+                  SELECT 1
+                  FROM view_owner_columns expected
+                  WHERE expected.table_name = t.relname
+                    AND expected.column_name = a.attname
+              )
+          )
     ) AS has_any
 ),
 owner_column_access AS (
@@ -218,6 +264,9 @@ SELECT
     (SELECT has_any FROM api_base_column_access) AS api_base_column_access,
     has_schema_privilege('sireader_view_owner', 'public', 'CREATE') AS owner_schema_create,
     (SELECT has_any FROM owner_base_table_access) AS owner_base_table_access,
+    (SELECT has_any FROM owner_base_table_maintain_access) AS owner_base_table_maintain,
+    (SELECT has_any FROM owner_has_role_memberships) AS owner_has_role_memberships,
+    (SELECT has_any FROM owner_unapproved_column_access) AS owner_unapproved_column_access,
     (SELECT granted_columns = expected_columns FROM owner_column_access) AS owner_column_allowlist_ok,
     (SELECT view_count FROM view_stats) AS approved_view_count,
     (SELECT owners_ok FROM view_stats) AS approved_view_owners_ok,
@@ -275,7 +324,13 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
     if snapshot.get("owner_schema_create") is not False:
         raise RuntimeError("sireader_view_owner must not retain CREATE on schema public.")
     if snapshot.get("owner_base_table_access") is not False:
-        raise RuntimeError("sireader_view_owner must use column-level grants, not table-level SELECT.")
+        raise RuntimeError("sireader_view_owner must use only column-level SELECT, not table-level privileges.")
+    if snapshot.get("owner_base_table_maintain") is not False:
+        raise RuntimeError("sireader_view_owner must not have MAINTAIN on protected base tables.")
+    if snapshot.get("owner_has_role_memberships") is not False:
+        raise RuntimeError("sireader_view_owner must not be a member of or grant its role to another role.")
+    if snapshot.get("owner_unapproved_column_access") is not False:
+        raise RuntimeError("sireader_view_owner has privileges on unapproved base-table columns.")
     if snapshot.get("owner_column_allowlist_ok") is not True:
         raise RuntimeError("sireader_view_owner lacks one or more approved base-table column grants.")
     if snapshot.get("approved_view_count") != 6:
