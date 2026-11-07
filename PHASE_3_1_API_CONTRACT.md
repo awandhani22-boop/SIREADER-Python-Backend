@@ -1,19 +1,19 @@
 # SIREADER Phase 3.1 — Batch 2 Architecture & API Contract
-## Spesifikasi Desain & Kontrak API Observabilitas Read-Only (Final Targeted Revision)
+## Spesifikasi Desain & Kontrak API Observabilitas Read-Only
 
-- **Status Dokumen:** `APPROVED FOR IMPLEMENTATION PLANNING` (Design-Only Revision)
+- **Status Dokumen:** `PENDING EMPIRICAL VERIFICATION (DESIGN FREEZE - NOT IMPLEMENTATION-READY)`
 - **Target Role Pelaksana:** Argon (Backend Developer — Batch 2 Implementation)
 - **Target Repository:** `awandhani22-boop/SIREADER-Python-Backend`
 - **Target Branch:** `phase-3-1-api-gateway`
 - **Referensi Arsitektur Induk:** `docs/PHASE_3_ARCHITECTURE.md` (Commit `223d592` pada repo Virtual Office)
-- **Prinsip Utama:** 100% Read-Only Observability, Database Boundary Sanitization, Zero Direct Base Table Access, Strict Identifier Sanitization, Unconfirmed Liveness Transparency.
+- **Prinsip Utama:** 100% Read-Only Observability, Database Boundary Sanitization, Zero Direct Base Table Access, Evaluated Identifier Governance, Transparent Unconfirmed Liveness.
 
 ---
 
 ## 1. Tujuan dan Batas Lingkup Batch 2
 
 ### 1.1 Tujuan
-Dokumen ini menetapkan spesifikasi arsitektur final, kontrak skema data (Pydantic DTO), spesifikasi **6 Database Views**, perancangan kueri database read-only, dan matriks sanitasi privasi untuk implementasi **Batch 2: Python Read-Only API Gateway** yang akan dikerjakan oleh **Argon**.
+Dokumen ini menetapkan spesifikasi arsitektur final, kontrak skema data (Pydantic DTO), spesifikasi **6 Database Views**, perancangan kueri database read-only, dan matriks sanitasi privasi untuk implementasi **Batch 2: Python Read-Only API Gateway** yang akan dikerjakan oleh **Argon** setelah seluruh prasyarat verifikasi empiris terpenuhi.
 
 ### 1.2 Batasan Arsitektur Keras (Architectural Boundaries)
 Sesuai ketetapan *Phase 3.0 Architecture Freeze*, batasan berikut bersifat mutlak dan dilarang dilanggar oleh implementasi Batch 2:
@@ -64,7 +64,7 @@ Rancangan SQL View pada dokumen Phase 3.0 lama mengandung banyak kolom fiktif ya
    - Catatan: Data lama sebelum migrasi memiliki kemungkinan `billing_currency IS NULL`. View wajib menangani dengan `COALESCE(billing_currency, 'IDR')`. IDR dan USD **DILARANG DIJUMLAHKAN**.
 3. **`AIAnalysisLog` (`app/database/models.py:737`):**
    - Kolom: `id`, `chat_id`, `target_message_id`, `status` (varchar(40)), `result_json` (Text nullable), `error_message` (Text nullable), `created_at`, `completed_at`.
-   - Catatan: **TIDAK MEMILIKI `updated_at`**. Status aktif saat inferensi adalah `'PROCESSING'`.
+   - Catatan: **TIDAK MEMILIKI `updated_at` DAN TIDAK MEMILIKI HEARTBEAT**. Status saat inferensi adalah `'PROCESSING'`.
 4. **`AIPendingMessage` (`app/database/models.py:1116`):**
    - Kolom: `id`, `dedup_key`, `chat_id`, `telegram_message_id`, `analysis_log_id`, `status` (varchar(20)), `reason`, `attempts`, `claimed_by`, `claimed_at`, `next_attempt_at`, `last_error`, `created_at`, `updated_at`.
    - Catatan: Menampung pesan yang tertunda akibat budget habis (`BLOCKED_HARD_BUDGET`, `MANUAL_REVIEW_BUDGET`).
@@ -185,7 +185,7 @@ CREATE OR REPLACE VIEW v_api_telemetry_usage AS
 -- Sanitasi:
 --   - Filter ketat: HANYA baris status = 'PROCESSING'
 --   - Mengecualikan chat_id, target_message_id, result_json, error_message
---   - Menghapus klaim fiktif has_checkpoint
+--   - Menghapus has_checkpoint karena result_json tidak menjamin checkpoint
 -- ------------------------------------------------------------
 CREATE OR REPLACE VIEW v_api_active_in_flight_tasks AS
     SELECT 
@@ -267,24 +267,55 @@ CREATE OR REPLACE VIEW v_api_audit_decisions AS
 
 ---
 
-### 3.2 Audit Komprehensif Identifier Internal (Internal Identifiers Governance)
+### 3.2 Evaluasi Tata Kelola Identifier Internal: Opaque vs Accepted Technical Debt
 
-Sesuai arahan arsitektur, seluruh identifier database dievaluasi secara ketat: mana yang diizinkan untuk identitas UI dan mana yang wajib disensor penuh:
+Sesuai arahan arsitektur, dokumen ini secara tegas **TIDAK MENGKLAIM** bahwa mengganti nama kolom integer autoincrement (`id AS task_id`, `id AS watch_id`, `id AS audit_id`, `id AS queue_item_id`) adalah bentuk anonimisasi atau sanitasi. 
 
-| View Name | Kolom Database Asli | Dipublikasikan ke API? | Nama Field Publik | Justifikasi Arsitektur |
+Aliasing kolom tetap mengekspos integer sequence asli dari database yang secara teori memungkinkan *enumeration attack* (penghitungan volume transaksi).
+
+#### A. Evaluasi Dua Strategi Identifier
+
+```text
++----------------------------------------------------------------------------------------------------+
+|                               STRATEGI TATA KELOLA IDENTIFIER                                      |
++-------------------------------------+--------------------------------------------------------------+
+| 1. Strategi Opaque Public ID        | Mengonversi ID internal menjadi string hash/token non-urut    |
+|    (Target Architecture / Produksi) | (misal: 'tsk_7m3q1a', 'aud_5p1z9y' via Sqids atau HMAC).     |
+|                                     | - Kelebihan: Proteksi total terhadap enumerasi data.         |
+|                                     | - Konsekuensi Teknis: Membutuhkan encoding/decoding di layer |
+|                                     |   API, atau ekstensi pgcrypto di Supabase. Menambah          |
+|                                     |   kompleksitas kueri pagination berbasis kursor.             |
++-------------------------------------+--------------------------------------------------------------+
+| 2. Strategi Integer Surrogate ID    | Mempertahankan primary key integer sebagai ID publik         |
+|    (Phase 3.1 Accepted Risk)        | ('task_id', 'watch_id', 'audit_id', 'queue_item_id').        |
+|                                     | - Klasifikasi: ACCEPTED TECHNICAL DEBT (RISIKO DITERIMA).    |
+|                                     | - Justifikasi & Mitigasi:                                    |
+|                                     |   a. API Gateway Phase 3.1 beroperasi murni pada localhost/  |
+|                                     |      private loopback BFF dengan Bearer token pre-shared.    |
+|                                     |   b. Tidak ada akses pengguna publik atau multi-tenant.      |
+|                                     |   c. Hubungan antar tabel (FK analysis_log_id, episode_id)   |
+|                                     |      TELAH DISENSOR TOTAL, sehingga enumerasi relasi silang  |
+|                                     |      tidak dapat dilakukan.                                  |
+|                                     |   d. Memungkinkan pagination kursor deterministik sederhana: |
+|                                     |      WHERE id < :cursor_id ORDER BY id DESC.                 |
++-------------------------------------+--------------------------------------------------------------+
+```
+
+#### B. Matriks Klasifikasi Identifier Phase 3.1
+
+| View Name | Kolom Database Asli | Nama Field Publik | Status Klasifikasi Risiko | Alasan Kebutuhan UI / Penanganan |
 |---|---|---|---|---|
-| `v_api_system_runtime_state` | `runtime_control_state.id` | **TIDAK** | *Dihapus* | Singleton state (baris tunggal). UI tidak memerlukan ID baris. |
-| `v_api_telemetry_usage` | `ai_usage_logs.id` | **TIDAK** | *Dihapus* | Data telemetri murni berupa agregasi metrik. ID baris tidak memiliki nilai observasi. |
-| `v_api_telemetry_usage` | `ai_usage_logs.request_id` | **TIDAK** | *Dihapus* | ID internal tracking provider AI. Berisiko membocorkan format internal payload. |
-| `v_api_telemetry_usage` | `ai_usage_logs.analysis_log_id` | **TIDAK** | *Dihapus* | Foreign key relasional internal yang tidak relevan untuk ringkasan biaya. |
-| `v_api_active_in_flight_tasks`| `ai_analysis_logs.id` | **YA** | `task_id` | **Surrogate Key UI:** Dibutuhkan oleh Three.js & React sebagai React `key` unik per item in-flight. |
-| `v_api_active_in_flight_tasks`| `chat_id`, `target_message_id`| **TIDAK** | *Dihapus* | Identitas privat Telegram mentor dan channel. Disensor total. |
-| `v_api_queued_pending_messages`| `ai_pending_messages.id`| **YA** | `queue_item_id` | **Surrogate Key UI:** Dibutuhkan oleh Virtual Office untuk render daftar antrean pending. |
-| `v_api_queued_pending_messages`| `dedup_key`, `chat_id`, `telegram_message_id`, `analysis_log_id`| **TIDAK** | *Dihapus* | Seluruh identitas privat pesan sumber dan foreign key internal disensor total. |
-| `v_api_active_market_watches` | `trade_decision_watches.id` | **YA** | `watch_id` | **Surrogate Key UI:** Dibutuhkan untuk identitas radar pemantau spread aktif pada workstation. |
-| `v_api_active_market_watches` | `analysis_log_id`, `trade_episode_id` | **TIDAK** | *Dihapus* | Foreign key relasi internal yang membocorkan ID urutan tabel transaksional. Disensor penuh. |
-| `v_api_audit_decisions` | `approval_decisions.id` | **YA** | `audit_id` | **Surrogate Key UI:** Dibutuhkan untuk cursor pagination dan React list keying audit log. |
-| `v_api_audit_decisions` | `approval_decisions.analysis_log_id` | **TIDAK** | *Dihapus* | **Koreksi Kritis:** Menghubungkan audit approver ke ID internal analysis log dihapus total dari View dan DTO. |
+| `v_api_system_runtime_state` | `runtime_control_state.id` | *Dihapus Total* | **ZERO EXPOSURE** | Singleton record. UI tidak membutuhkan ID baris kontrol. |
+| `v_api_telemetry_usage` | `ai_usage_logs.id` | *Dihapus Total* | **ZERO EXPOSURE** | Data telemetri agregasi. ID baris tidak memiliki nilai observasi. |
+| `v_api_telemetry_usage` | `request_id`, `analysis_log_id` | *Dihapus Total* | **ZERO EXPOSURE** | ID tracking provider dan foreign key internal disensor total. |
+| `v_api_active_in_flight_tasks`| `ai_analysis_logs.id` | `task_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan oleh Virtual Office / Three.js sebagai React `key` unik per item in-flight. |
+| `v_api_active_in_flight_tasks`| `chat_id`, `target_message_id`| *Dihapus Total* | **ZERO EXPOSURE** | Identitas privat Telegram mentor dan channel disensor penuh. |
+| `v_api_queued_pending_messages`| `ai_pending_messages.id`| `queue_item_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan oleh Virtual Office untuk render daftar antrean pending. |
+| `v_api_queued_pending_messages`| `dedup_key`, `telegram_message_id`| *Dihapus Total* | **ZERO EXPOSURE** | Identitas pesan sumber dan foreign key internal disensor penuh. |
+| `v_api_active_market_watches` | `trade_decision_watches.id` | `watch_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan untuk identitas radar pemantau spread aktif pada workstation. |
+| `v_api_active_market_watches` | `analysis_log_id`, `trade_episode_id` | *Dihapus Total* | **ZERO EXPOSURE** | Foreign key relasi internal yang membocorkan urutan tabel transaksional disensor total. |
+| `v_api_audit_decisions` | `approval_decisions.id` | `audit_id` (Integer) | **ACCEPTED TECHNICAL DEBT** | Dibutuhkan untuk cursor pagination deterministik dan React list keying audit log. |
+| `v_api_audit_decisions` | `approval_decisions.analysis_log_id` | *Dihapus Total* | **ZERO EXPOSURE** | **Koreksi Kritis:** Menghubungkan audit approver ke ID internal analysis log dihapus total dari View dan DTO. |
 
 ---
 
@@ -379,28 +410,70 @@ ALTER VIEW public.v_api_audit_decisions OWNER TO sireader_view_owner;
    REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sireader_api_ro;
    ```
 
-#### E. Skrip Audit Verifikasi Privilege Efektif (Empirical Verification Protocol)
-Sebelum sistem dinyatakan aman, DBA wajib menjalankan verifikasi berikut di Supabase pada Milestone 3.1:
+#### E. Protokol Audit Lengkap Verifikasi Privilege Efektif (7-Step Protocol)
+> [!WARNING]
+> **PERINGATAN ARSITEKTUR KRITIS: STATUS DESAIN BELUM DIVERIFIKASI (UNVERIFIED HYPOTHESIS).**
+> Keamanan role dan view ini **DILARANG DINYATAKAN AMAN** sebelum seluruh 7 protokol audit empiris berikut dijalankan langsung pada instance Supabase riil dan hasilnya diverifikasi oleh DBA/Owner:
+
 ```sql
--- 1. Verifikasi membership (keduanya harus 0 baris, bebas dari role istimewa)
-SELECT * FROM pg_auth_members WHERE member IN ('sireader_view_owner'::regrole, 'sireader_api_ro'::regrole);
+-- 1. Verifikasi Atribut Role (pg_roles)
+SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls
+FROM pg_roles 
+WHERE rolname IN ('sireader_view_owner', 'sireader_api_ro');
+-- Target: Keduanya harus FALSE untuk super, inherit, createrole, createdb, repl, bypassrls.
+--         view_owner must have canlogin=false; api_ro must have canlogin=true.
 
--- 2. Verifikasi kepemilikan view (seluruh 6 view harus dimiliki sireader_view_owner)
-SELECT table_name, view_owner 
-FROM information_schema.views 
-WHERE table_schema = 'public' AND table_name LIKE 'v_api_%';
+-- 2. Verifikasi Isolasi Membership (pg_auth_members)
+SELECT r.rolname AS role_name, m.rolname AS member_of
+FROM pg_auth_members am
+JOIN pg_roles r ON am.member = r.oid
+JOIN pg_roles m ON am.roleid = m.oid
+WHERE r.rolname IN ('sireader_view_owner', 'sireader_api_ro');
+-- Target: 0 baris (tidak ada keanggotaan ke postgres, authenticated, service_role, anon).
 
--- 3. Verifikasi ketiadaan hak SELECT sireader_api_ro pada tabel dasar (harus 0 baris)
+-- 3. Verifikasi Hak Skema (Schema Privileges)
+SELECT 
+    has_schema_privilege('sireader_view_owner', 'public', 'USAGE') AS view_owner_usage,
+    has_schema_privilege('sireader_view_owner', 'public', 'CREATE') AS view_owner_create,
+    has_schema_privilege('sireader_api_ro', 'public', 'USAGE') AS api_ro_usage,
+    has_schema_privilege('sireader_api_ro', 'public', 'CREATE') AS api_ro_create;
+-- Target: USAGE = true, CREATE = false untuk kedua role.
+
+-- 4. Verifikasi Pencabutan Hak Akses PUBLIC (PUBLIC Grants Audit)
+SELECT table_name, privilege_type 
+FROM information_schema.table_privileges 
+WHERE grantee = 'PUBLIC' AND table_schema = 'public';
+-- Target: Tidak ada izin SELECT/INSERT/UPDATE/DELETE default pada tabel/view aplikasi untuk PUBLIC.
+
+-- 5. Verifikasi Hak Akses Tabel Dasar (Base Tables Access Check)
+-- A. sireader_api_ro harus memiliki ZERO PRIVILEGES pada tabel dasar:
 SELECT table_name, privilege_type 
 FROM information_schema.table_privileges 
 WHERE grantee = 'sireader_api_ro' 
   AND table_schema = 'public' 
   AND table_name NOT LIKE 'v_api_%';
+-- Target: 0 baris (tidak ada izin apapun pada tabel dasar).
 
--- 4. Verifikasi penetrasi langsung (harus gagal dengan permission denied):
+-- B. sireader_view_owner hanya memiliki column-level privileges yang disetujui:
+SELECT table_name, column_name, privilege_type 
+FROM information_schema.column_privileges 
+WHERE grantee = 'sireader_view_owner' AND table_schema = 'public';
+-- Target: Hanya kolom yang di-allowlist pada DDL view. Tidak ada sender, chat_id, reviewer, note, dll.
+
+-- 6. Verifikasi Kepemilikan View & Hak Akses View
+SELECT v.table_name, v.view_owner, tp.grantee, tp.privilege_type
+FROM information_schema.views v
+JOIN information_schema.table_privileges tp 
+  ON v.table_name = tp.table_name AND tp.table_schema = 'public'
+WHERE v.table_schema = 'public' AND v.table_name LIKE 'v_api_%'
+  AND tp.grantee = 'sireader_api_ro';
+-- Target: Seluruh 6 view dimiliki sireader_view_owner dan grantee sireader_api_ro memiliki SELECT.
+
+-- 7. Uji Penetrasi Query Langsung (Direct Penetration Simulation)
 -- SET ROLE sireader_api_ro;
--- SELECT * FROM public.approval_decisions; -- WAJIB ERROR: permission denied
--- SELECT * FROM public.v_api_audit_decisions; -- WAJIB SUKSES
+-- SELECT * FROM public.approval_decisions; -- WAJIB ERROR: permission denied for table approval_decisions
+-- SELECT * FROM public.ai_analysis_logs;   -- WAJIB ERROR: permission denied for table ai_analysis_logs
+-- SELECT * FROM public.v_api_audit_decisions; -- WAJIB SUKSES mengembalikan data tersanitasi
 -- RESET ROLE;
 ```
 
@@ -561,17 +634,22 @@ class SystemStatusResponse(BaseModel):
   - Mengelompokkan berdasarkan `billing_currency`.
 
 #### Desain Kueri Lengkap Tiga Tahap:
-Argon akan mengeksekusi 3 kueri agregasi terpisah dalam 1 sesi read-only untuk mengisi seluruh field DTO:
+Argon akan mengeksekusi 3 kueri agregasi terpisah dalam 1 sesi read-only untuk mengisi seluruh field DTO, dengan pemisahan kolom mata uang mutlak:
 
 ```python
 # Kueri 1: Agregasi per Mata Uang (Totals & Token Breakdown)
+# PENTING: Hanya menjumlahkan kolom biaya yang sesuai dengan mata uang baris tersebut
 stmt_currency = (
     select(
         v_api_telemetry_usage.c.billing_currency,
-        func.coalesce(func.sum(v_api_telemetry_usage.c.cost_rp), 0).label("total_cost_rp"),
-        func.coalesce(func.sum(v_api_telemetry_usage.c.reserved_rp), 0).label("total_reserved_rp"),
-        func.coalesce(func.sum(v_api_telemetry_usage.c.cost_usd), 0).label("total_cost_usd"),
-        func.coalesce(func.sum(v_api_telemetry_usage.c.reserved_usd), 0).label("total_reserved_usd"),
+        case(
+            (v_api_telemetry_usage.c.billing_currency == 'USD', func.coalesce(func.sum(v_api_telemetry_usage.c.cost_usd), 0)),
+            else_=func.coalesce(func.sum(v_api_telemetry_usage.c.cost_rp), 0),
+        ).label("total_cost"),
+        case(
+            (v_api_telemetry_usage.c.billing_currency == 'USD', func.coalesce(func.sum(v_api_telemetry_usage.c.reserved_usd), 0)),
+            else_=func.coalesce(func.sum(v_api_telemetry_usage.c.reserved_rp), 0),
+        ).label("total_reserved"),
         func.coalesce(func.sum(v_api_telemetry_usage.c.input_tokens), 0).label("input_tokens"),
         func.coalesce(func.sum(v_api_telemetry_usage.c.output_tokens), 0).label("output_tokens"),
         func.coalesce(func.sum(v_api_telemetry_usage.c.cache_read_tokens), 0).label("cache_read_tokens"),
@@ -601,6 +679,7 @@ stmt_status = (
 )
 
 # Kueri 3: Rincian Pemakaian per Model dan Tier
+# PENTING: Nilai cost per model hanya mengambil kolom biaya yang sesuai mata uang
 stmt_models = (
     select(
         v_api_telemetry_usage.c.billing_currency,
@@ -654,7 +733,7 @@ class ModelTelemetryDTO(BaseModel):
     tier: str = Field(description="Tier inferensi: FAST / REASONING / ESCALATION")
     currency: str = Field(description="IDR atau USD")
     requests: int = Field(default=0)
-    cost: Decimal = Field(description="Biaya aktual")
+    cost: Decimal = Field(description="Biaya aktual (sesuai currency)")
     tokens: TokenBreakdownDTO = Field(description="Rincian token")
 
 class TelemetryUsageResponse(BaseModel):
@@ -684,13 +763,13 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 
 class InFlightAnalysisDTO(BaseModel):
-    task_id: int = Field(description="Surrogate identifier untuk task aktif (React list key)")
+    task_id: int = Field(description="Surrogate identifier untuk task aktif (React list key - Accepted Debt)")
     status: Literal["PROCESSING"] = Field(default="PROCESSING")
     created_at: datetime = Field(description="Waktu task mulai dicatat di database (UTC)")
     elapsed_seconds: float = Field(description="Usia keberadaan record dalam detik (bukan heartbeat liveness)")
 
 class QueuedMessageDTO(BaseModel):
-    queue_item_id: int = Field(description="Surrogate identifier untuk item antrean (React list key)")
+    queue_item_id: int = Field(description="Surrogate identifier untuk item antrean (React list key - Accepted Debt)")
     status: Literal["PENDING", "CLAIMED"] = Field(description="Status antrean")
     queue_reason: Literal["BLOCKED_HARD_BUDGET", "MANUAL_REVIEW_BUDGET", "OTHER"] = Field(
         description="Kode alasan antrean allowlisted"
@@ -729,7 +808,7 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 
 class MarketWatchItemDTO(BaseModel):
-    watch_id: int = Field(description="Surrogate identifier pengawasan spread (React list key)")
+    watch_id: int = Field(description="Surrogate identifier pengawasan spread (React list key - Accepted Debt)")
     symbol: str = Field(description="Simbol instrumen (mis: XAUUSD)")
     status: Literal["WAITING_FOR_SPREAD", "RECHECKING"] = Field(description="Status pengawasan aktif")
     spread_pips: Decimal | None = Field(default=None, description="Spread pips terakhir yang teramati")
@@ -772,7 +851,7 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 
 class AuditDecisionItemDTO(BaseModel):
-    audit_id: int = Field(description="Surrogate identifier rekaman audit (React list key)")
+    audit_id: int = Field(description="Surrogate identifier rekaman audit (React list key - Accepted Debt)")
     decision: Literal["APPROVED", "REJECTED"] = Field(description="Keputusan yang diambil")
     previous_status: str = Field(description="Status sebelum keputusan (mis: MANUAL_REVIEW)")
     new_status: str = Field(description="Status setelah keputusan (mis: APPROVED / REJECTED)")
@@ -825,27 +904,34 @@ def verify_api_token(provided_token: str | None, expected_token: str) -> bool:
 
 ## 7. Freshness & Liveness Semantics Sesuai Architecture Freeze
 
-Dokumen ini menyelaraskan kembali interpretasi status aktivitas dengan **Phase 3.0 Architecture Freeze** dan memperbaiki kesalahan inferensi:
+Dokumen ini menyelaraskan kembali interpretasi status aktivitas dengan **Phase 3.0 Architecture Freeze** dan mengoreksi asumsi inferensi liveness:
 
 ```text
-+-------------------+---------------------------------------+----------------------------------+
-| STATUS SISTEM     | STATUS VISUAL 3D                      | ARTI & PRESENTASI                |
-+-------------------+---------------------------------------+----------------------------------+
-| In-flight Record  | BUSY (Unconfirmed Liveness Inference) | Record PROCESSING terdeteksi     |
-| Tidak ada task    | QUIET (Business Idle - BUKAN STALE)   | Normal tenang, avatar standby    |
-| Transport Putus   | DISCONNECTED                          | Transport HTTP/SSE terputus      |
-| Database Down     | DB_UNAVAILABLE                        | Gagal kontak ke Supabase         |
-| Anomali Data      | UNKNOWN                               | Parsing JSON gagal / data rusak  |
-+-------------------+---------------------------------------+----------------------------------+
++-----------------------+---------------------------------------+--------------------------------------+
+| KONDISI RECORD DATA   | STATUS PROYEKSI VISUAL 3D             | ARTI & PRESENTASI VIRTUAL OFFICE     |
++-----------------------+---------------------------------------+--------------------------------------+
+| Ada record PROCESSING | IN_FLIGHT_UNCONFIRMED                 | Avatar pose netral/observan, badge   |
+|                       | (Record In-Flight Terdeteksi)         | 'IN_FLIGHT_UNCONFIRMED', pulsasi     |
+|                       |                                       | biru/amber lembut (BUKAN animasi     |
+|                       |                                       | mengetik aktif yang terkonfirmasi)   |
++-----------------------+---------------------------------------+--------------------------------------+
+| Tidak ada task aktif  | QUIET (Business Idle - BUKAN STALE)   | Avatar pose standby tenang normal    |
++-----------------------+---------------------------------------+--------------------------------------+
+| Transport terputus    | DISCONNECTED                          | Workstation abu-abu transparan       |
++-----------------------+---------------------------------------+--------------------------------------+
+| Database unreachable  | DB_UNAVAILABLE                        | Peringatan database koneksi merah    |
++-----------------------+---------------------------------------+--------------------------------------+
+| Anomali / JSON rusak  | UNKNOWN                               | Badge indikator anomali abu-abu      |
++-----------------------+---------------------------------------+--------------------------------------+
 ```
 
 ### Aturan Diagnostik Mutlak:
 1. **Larangan Menyimpulkan Worker Crash:**
    Karena backend saat ini **BELUM MEMILIKI HEARTBEAT PERIODIK ATAU `updated_at` PADA `AIAnalysisLog`**, API Gateway dan Virtual Office **DILARANG KERAS** menyimpulkan bahwa background worker telah crash hanya karena usia record `created_at` sudah tua.
-2. **Hapus Status STALE Berdasarkan `created_at`:**
-   Nilai `created_at` hanya menunjukkan kapan pesan mulai dicatat, bukan bukti kapan worker terakhir beroperasi. Oleh karena itu, klasifikasi `STALE` berdasarkan batas usia `created_at > 180s` **DIHAPUS**.
-3. **Semantik In-Flight Murni:**
-   Task dengan status `PROCESSING` hanya dinyatakan sebagai **in-flight record dengan liveness tidak terkonfirmasi** (*unconfirmed in-flight record*). Proyeksi 3D menampilkan avatar dalam pose inferensi tanpa klaim kepastian proses OS aktif.
+2. **Larangan Menyimpulkan Worker Pasti BUSY:**
+   Keberadaan record `status = 'PROCESSING'` dan nilai `elapsed_seconds` **BUKAN BUKTI** bahwa proses worker OS sedang aktif mengeksekusi inferensi. Proses OS bisa saja macet di upstream provider atau berhenti.
+3. **Penyajian Visual yang Jujur:**
+   Virtual Office **DILARANG** menampilkan avatar yang mengetik cepat atau indikator hijau solid seolah worker dipastikan sedang sibuk (*confirmed busy*). Visualisasi wajib menggunakan status **`IN_FLIGHT_UNCONFIRMED`** dengan pose netral dan badge transparan.
 4. **Ketiadaan Task Bukan Stale:**
    Jika tidak ada task aktif selama berjam-jam, sistem berstatus **`QUIET`**. Ketiadaan task adalah kondisi bisnis normal saat pasar tenang.
 
@@ -857,9 +943,9 @@ Dokumen ini menyelaraskan kembali interpretasi status aktivitas dengan **Phase 3
 |---|---|---|---|---|
 | `GET /api/v1/system/status` | `v_api_system_runtime_state` | `runtime_control_state` | `execution_mode`, `trading_mode`, `auto_execution_enabled`, `auto_paused`, `updated_at` | `id` (internal singleton PK), `updated_by` (ID Telegram operator) |
 | `GET /api/v1/telemetry/usage` | `v_api_telemetry_usage` | `ai_usage_logs` | `usage_date`, `provider`, `model`, `tier`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `thinking_tokens`, `billing_currency`, `cost_rp`, `reserved_rp`, `cost_usd`, `reserved_usd`, `status`, `created_at`, `completed_at` | `id`, `request_id`, `analysis_log_id`, `error_message`, `cache_write_5m_tokens`, `cache_write_1h_tokens`, `cache_ttl_estimated` |
-| `GET /api/v1/pipeline/active` | `v_api_active_in_flight_tasks` & `v_api_queued_pending_messages` | `ai_analysis_logs` & `ai_pending_messages` | **In-flight:** `task_id`, `status`, `created_at`, `elapsed_seconds`.<br>**Queued:** `queue_item_id`, `status`, `queue_reason` (allowlisted: BLOCKED_HARD_BUDGET, MANUAL_REVIEW_BUDGET, OTHER), `attempts`, `claimed_at`, `created_at`, `updated_at` | `chat_id`, `target_message_id`, `result_json`, `error_message`, `has_checkpoint` (fiktif), `dedup_key`, `telegram_message_id`, `analysis_log_id`, `claimed_by`, `last_error`, `next_attempt_at` |
-| `GET /api/v1/market-watches/active` | `v_api_active_market_watches` | `trade_decision_watches` | `watch_id`, `symbol`, `status`, `spread_pips`, `maximum_spread_pips`, `last_bid`, `last_ask`, `check_count`, `last_checked_at`, `next_check_at`, `created_at`, `updated_at` | `analysis_log_id`, `trade_episode_id`, `broker_server`, `last_reason`, `resolved_at` |
-| `GET /api/v1/audit/decisions` | `v_api_audit_decisions` | `approval_decisions` | `audit_id`, `decision`, `previous_status`, `new_status`, `reviewer_role`, `decided_at` | `analysis_log_id` (internal FK), `reviewer` (Telegram Username/ID), `note` (Catatan internal disensor penuh dari View) |
+| `GET /api/v1/pipeline/active` | `v_api_active_in_flight_tasks` & `v_api_queued_pending_messages` | `ai_analysis_logs` & `ai_pending_messages` | **In-flight:** `task_id` (accepted debt), `status`, `created_at`, `elapsed_seconds`.<br>**Queued:** `queue_item_id` (accepted debt), `status`, `queue_reason` (allowlisted), `attempts`, `claimed_at`, `created_at`, `updated_at` | `chat_id`, `target_message_id`, `result_json`, `error_message`, `has_checkpoint` (fiktif), `dedup_key`, `telegram_message_id`, `analysis_log_id`, `claimed_by`, `last_error`, `next_attempt_at` |
+| `GET /api/v1/market-watches/active` | `v_api_active_market_watches` | `trade_decision_watches` | `watch_id` (accepted debt), `symbol`, `status`, `spread_pips`, `maximum_spread_pips`, `last_bid`, `last_ask`, `check_count`, `last_checked_at`, `next_check_at`, `created_at`, `updated_at` | `analysis_log_id`, `trade_episode_id`, `broker_server`, `last_reason`, `resolved_at` |
+| `GET /api/v1/audit/decisions` | `v_api_audit_decisions` | `approval_decisions` | `audit_id` (accepted debt), `decision`, `previous_status`, `new_status`, `reviewer_role`, `decided_at` | `analysis_log_id` (internal FK disensor), `reviewer` (Telegram Username/ID), `note` (Catatan internal disensor penuh dari View) |
 
 ---
 
@@ -872,7 +958,7 @@ Implementasi Batch 2 dinyatakan lulus kriteria keamanan jika memenuhi 10 kriteri
 3. **Exact Token Comparison:** `verify_api_token()` menggunakan perbandingan waktu-konstan persis (`secrets.compare_digest(provided_token, expected_token)`) tanpa `.strip()` pada `provided_token`.
 4. **Zero Base Table SELECT:** Seluruh kueri dieksekusi HANYA pada 6 View (`v_api_*`). API Gateway tidak memiliki kueri yang membaca tabel dasar.
 5. **Zero Foreign Keys Exposed:** `analysis_log_id`, `trade_episode_id`, dan foreign key internal lainnya tidak diekspos di View audit maupun endpoint publik.
-6. **Separation of Currencies:** IDR dan USD dilaporkan terpisah tanpa penjumlahan lintas mata uang.
+6. **Separation of Currencies:** IDR dan USD dilaporkan terpisah tanpa penjumlahan lintas mata uang pada seluruh total, reservasi, dan model breakdown.
 7. **Asia/Jakarta Timezone Evaluation:** Evaluasi tanggal pemakaian token AI menggunakan zona waktu `Asia/Jakarta`.
 8. **Isolated Connection Pool:** API Gateway hanya menggunakan pool read-only (`pool_size=2, max_overflow=0`) dengan role `sireader_api_ro`.
 9. **Fail-Closed Configuration:** Jika `SIREADER_API_DATABASE_URL` atau `SIREADER_API_AUTH_TOKEN` kosong/tidak ada, aplikasi menolak beroperasi secara fail-closed.
@@ -964,4 +1050,4 @@ Argon wajib mengimplementasikan pengujian komprehensif di `tests/api/test_endpoi
 ```
 
 ---
-*Dokumen revisi final ini telah diperiksa silang terhadap source code riil dan siap diserahkan kepada Argon.*
+*Dokumen ini berstatus PENDING EMPIRICAL VERIFICATION dan belum disahkan sebagai implementation-ready sebelum pengujian empiris pada Supabase selesai diverifikasi.*
