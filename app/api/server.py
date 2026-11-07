@@ -24,6 +24,192 @@ from app.api.routes import (
 
 logger = logging.getLogger(__name__)
 
+PRIVILEGE_AUDIT_SQL = """
+WITH
+base_tables(table_name) AS (
+    VALUES
+        ('runtime_control_state'),
+        ('ai_usage_logs'),
+        ('ai_analysis_logs'),
+        ('ai_pending_messages'),
+        ('trade_decision_watches'),
+        ('approval_decisions')
+),
+table_privileges(privilege_name) AS (
+    VALUES
+        ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'),
+        ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')
+),
+column_privileges(privilege_name) AS (
+    VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')
+),
+view_names(view_name) AS (
+    VALUES
+        ('v_api_system_runtime_state'),
+        ('v_api_telemetry_usage'),
+        ('v_api_active_in_flight_tasks'),
+        ('v_api_queued_pending_messages'),
+        ('v_api_active_market_watches'),
+        ('v_api_audit_decisions')
+),
+view_owner_columns(table_name, column_name) AS (
+    VALUES
+        ('runtime_control_state', 'execution_mode'),
+        ('runtime_control_state', 'trading_mode'),
+        ('runtime_control_state', 'auto_execution_enabled'),
+        ('runtime_control_state', 'auto_paused'),
+        ('runtime_control_state', 'updated_at'),
+        ('ai_usage_logs', 'usage_date'),
+        ('ai_usage_logs', 'provider'),
+        ('ai_usage_logs', 'model'),
+        ('ai_usage_logs', 'tier'),
+        ('ai_usage_logs', 'input_tokens'),
+        ('ai_usage_logs', 'output_tokens'),
+        ('ai_usage_logs', 'cache_read_tokens'),
+        ('ai_usage_logs', 'cache_write_tokens'),
+        ('ai_usage_logs', 'thinking_tokens'),
+        ('ai_usage_logs', 'billing_currency'),
+        ('ai_usage_logs', 'cost_rp'),
+        ('ai_usage_logs', 'reserved_rp'),
+        ('ai_usage_logs', 'cost_usd'),
+        ('ai_usage_logs', 'reserved_usd'),
+        ('ai_usage_logs', 'status'),
+        ('ai_usage_logs', 'created_at'),
+        ('ai_usage_logs', 'completed_at'),
+        ('ai_analysis_logs', 'id'),
+        ('ai_analysis_logs', 'status'),
+        ('ai_analysis_logs', 'created_at'),
+        ('ai_pending_messages', 'id'),
+        ('ai_pending_messages', 'status'),
+        ('ai_pending_messages', 'reason'),
+        ('ai_pending_messages', 'attempts'),
+        ('ai_pending_messages', 'claimed_at'),
+        ('ai_pending_messages', 'created_at'),
+        ('ai_pending_messages', 'updated_at'),
+        ('trade_decision_watches', 'id'),
+        ('trade_decision_watches', 'symbol'),
+        ('trade_decision_watches', 'status'),
+        ('trade_decision_watches', 'spread_pips'),
+        ('trade_decision_watches', 'maximum_spread_pips'),
+        ('trade_decision_watches', 'last_bid'),
+        ('trade_decision_watches', 'last_ask'),
+        ('trade_decision_watches', 'check_count'),
+        ('trade_decision_watches', 'last_checked_at'),
+        ('trade_decision_watches', 'next_check_at'),
+        ('trade_decision_watches', 'created_at'),
+        ('trade_decision_watches', 'updated_at'),
+        ('approval_decisions', 'id'),
+        ('approval_decisions', 'decision'),
+        ('approval_decisions', 'previous_status'),
+        ('approval_decisions', 'new_status'),
+        ('approval_decisions', 'created_at')
+),
+view_rows AS (
+    SELECT
+        c.relname,
+        owner_role.rolname AS owner_name,
+        owner_role.rolcanlogin AS owner_can_login,
+        owner_role.rolsuper AS owner_is_superuser,
+        owner_role.rolinherit AS owner_inherits,
+        owner_role.rolcreatedb AS owner_can_createdb,
+        owner_role.rolcreaterole AS owner_can_createrole,
+        owner_role.rolreplication AS owner_is_replication,
+        owner_role.rolbypassrls AS owner_bypasses_rls,
+        has_table_privilege(current_user, c.oid, 'SELECT') AS api_can_select
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_roles owner_role ON owner_role.oid = c.relowner
+    WHERE n.nspname = 'public'
+      AND c.relkind = 'v'
+      AND c.relname IN (SELECT view_name FROM view_names)
+),
+api_base_table_access AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM base_tables b
+        CROSS JOIN table_privileges p
+        WHERE has_table_privilege(
+            current_user,
+            format('public.%I', b.table_name),
+            p.privilege_name
+        )
+    ) AS has_any
+),
+api_base_column_access AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_class t
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = t.oid
+        CROSS JOIN column_privileges p
+        WHERE n.nspname = 'public'
+          AND t.relname IN (SELECT table_name FROM base_tables)
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND has_column_privilege(current_user, t.oid, a.attnum, p.privilege_name)
+    ) AS has_any
+),
+owner_base_table_access AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM base_tables b
+        WHERE has_table_privilege(
+            'sireader_view_owner',
+            format('public.%I', b.table_name),
+            'SELECT'
+        )
+    ) AS has_any
+),
+owner_column_access AS (
+    SELECT
+        COUNT(*) AS expected_columns,
+        COUNT(*) FILTER (
+            WHERE t.oid IS NOT NULL
+              AND a.attnum IS NOT NULL
+              AND has_column_privilege('sireader_view_owner', t.oid, a.attnum, 'SELECT')
+        ) AS granted_columns
+    FROM view_owner_columns expected
+    LEFT JOIN pg_namespace n ON n.nspname = 'public'
+    LEFT JOIN pg_class t ON t.relnamespace = n.oid AND t.relname = expected.table_name
+    LEFT JOIN pg_attribute a ON a.attrelid = t.oid
+                           AND a.attname = expected.column_name
+                           AND a.attnum > 0
+                           AND NOT a.attisdropped
+),
+view_stats AS (
+    SELECT
+        COUNT(*) AS view_count,
+        COALESCE(BOOL_AND(owner_name = 'sireader_view_owner'), FALSE) AS owners_ok,
+        COALESCE(BOOL_AND(api_can_select), FALSE) AS api_select_ok,
+        COALESCE(BOOL_AND(
+            NOT owner_can_login
+            AND NOT owner_is_superuser
+            AND NOT owner_inherits
+            AND NOT owner_can_createdb
+            AND NOT owner_can_createrole
+            AND NOT owner_is_replication
+            AND NOT owner_bypasses_rls
+        ), FALSE) AS owner_attributes_ok
+    FROM view_rows
+)
+SELECT
+    has_schema_privilege(current_user, 'public', 'USAGE') AS api_schema_usage,
+    has_schema_privilege(current_user, 'public', 'CREATE') AS api_schema_create,
+    EXISTS (
+        SELECT 1 FROM pg_auth_members
+        WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+    ) AS api_has_role_memberships,
+    (SELECT has_any FROM api_base_table_access) AS api_base_table_access,
+    (SELECT has_any FROM api_base_column_access) AS api_base_column_access,
+    has_schema_privilege('sireader_view_owner', 'public', 'CREATE') AS owner_schema_create,
+    (SELECT has_any FROM owner_base_table_access) AS owner_base_table_access,
+    (SELECT granted_columns = expected_columns FROM owner_column_access) AS owner_column_allowlist_ok,
+    (SELECT view_count FROM view_stats) AS approved_view_count,
+    (SELECT owners_ok FROM view_stats) AS approved_view_owners_ok,
+    (SELECT api_select_ok FROM view_stats) AS approved_view_select_ok,
+    (SELECT owner_attributes_ok FROM view_stats) AS view_owner_attributes_ok
+"""
+
 
 def validate_local_bind_host(host: str) -> str:
     if host != "127.0.0.1":
@@ -54,8 +240,40 @@ def validate_ro_database_identity(identity: Mapping[str, Any] | None) -> None:
         )
 
 
+def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
+    """Fail closed unless the six-view / zero-base-table access boundary is proven."""
+    if snapshot is None:
+        raise RuntimeError("Cannot verify effective API database privileges.")
+
+    if snapshot.get("api_schema_usage") is not True:
+        raise RuntimeError("sireader_api_ro requires USAGE on schema public.")
+    if snapshot.get("api_schema_create") is not False:
+        raise RuntimeError("sireader_api_ro must not have CREATE on schema public.")
+    if snapshot.get("api_has_role_memberships") is not False:
+        raise RuntimeError("sireader_api_ro must not inherit or SET ROLE through memberships.")
+    if snapshot.get("api_base_table_access") is not False:
+        raise RuntimeError("sireader_api_ro has an effective privilege on a protected base table.")
+    if snapshot.get("api_base_column_access") is not False:
+        raise RuntimeError("sireader_api_ro has an effective privilege on a protected base-table column.")
+    if snapshot.get("owner_schema_create") is not False:
+        raise RuntimeError("sireader_view_owner must not retain CREATE on schema public.")
+    if snapshot.get("owner_base_table_access") is not False:
+        raise RuntimeError("sireader_view_owner must use column-level grants, not table-level SELECT.")
+    if snapshot.get("owner_column_allowlist_ok") is not True:
+        raise RuntimeError("sireader_view_owner lacks one or more approved base-table column grants.")
+    if snapshot.get("approved_view_count") != 6:
+        raise RuntimeError("All six approved API views must exist before the API can start.")
+    if snapshot.get("approved_view_owners_ok") is not True:
+        raise RuntimeError("All approved API views must be owned by sireader_view_owner.")
+    if snapshot.get("approved_view_select_ok") is not True:
+        raise RuntimeError("sireader_api_ro must have SELECT on all six approved API views.")
+    if snapshot.get("view_owner_attributes_ok") is not True:
+        raise RuntimeError("sireader_view_owner role attributes violate the least-privilege policy.")
+
+
 def _validate_live_database_session() -> None:
-    """Verify authenticated role attributes and transaction mode before serving requests."""
+    """Verify role attributes, connection mode, effective grants and view ownership before serving requests."""
+
     session = ro_session_factory.get_session()
     try:
         identity = session.execute(
@@ -77,6 +295,8 @@ def _validate_live_database_session() -> None:
             )
         ).mappings().one_or_none()
         validate_ro_database_identity(identity)
+        privileges = session.execute(text(PRIVILEGE_AUDIT_SQL)).mappings().one_or_none()
+        validate_ro_database_privileges(privileges)
     finally:
         session.close()
 
