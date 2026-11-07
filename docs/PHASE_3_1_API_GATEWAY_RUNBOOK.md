@@ -55,13 +55,13 @@ Use the existing local backend root, for example C:\SIREADER. The API reads its 
 
 Add the following values to the local .env only after the DBA has issued a dedicated sireader_api_ro database credential:
 
-\`\`\`dotenv
+```dotenv
 SIREADER_API_DATABASE_URL=postgresql+psycopg://sireader_api_ro:<URL_ENCODED_PASSWORD>@db.otinrvvfjnyxjvzcmdia.supabase.co:5432/postgres?sslmode=require
 SIREADER_API_AUTH_TOKEN=<LONG_RANDOM_SERVER_ONLY_TOKEN>
 API_HOST=127.0.0.1
 API_PORT=8000
 API_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-\`\`\`
+```
 
 Important:
 - Replace every placeholder. URL-encode reserved characters in the database password.
@@ -69,9 +69,9 @@ Important:
 - Do not commit .env, database passwords, bearer tokens, or connection strings.
 - Generate a strong bearer token locally with:
 
-  \`\`\`powershell
+  ```powershell
   python -c "import secrets; print(secrets.token_urlsafe(48))"
-  \`\`\`
+  ```
 
 - Store the token only in the backend server environment. Never place it in Vite VITE_* variables, React code, JavaScript bundles, browser storage, or a public frontend request.
 - Keep API_HOST=127.0.0.1. Do not override the host using Uvicorn CLI flags.
@@ -80,11 +80,11 @@ Important:
 
 From PowerShell:
 
-\`\`\`powershell
+```powershell
 cd C:\SIREADER
 .\.venv\Scripts\Activate.ps1
 python -m app.api.server
-\`\`\`
+```
 
 The process must start only if the live database passes the startup checks:
 - authenticated current_user is sireader_api_ro;
@@ -103,21 +103,21 @@ Stop the server with Ctrl+C. The server owns one Uvicorn worker and closes its r
 
 In a second PowerShell window, enter the server-only token without echo:
 
-\`\`\`powershell
+```powershell
 $token = Read-Host "API bearer token"
 $headers = @{ Authorization = "Bearer $token" }
 $base = "http://127.0.0.1:8000"
-\`\`\`
+```
 
 Call the five approved GET routes:
 
-\`\`\`powershell
+```powershell
 Invoke-RestMethod -Method Get -Uri "$base/api/v1/system/status" -Headers $headers
 Invoke-RestMethod -Method Get -Uri "$base/api/v1/telemetry/usage" -Headers $headers
 Invoke-RestMethod -Method Get -Uri "$base/api/v1/pipeline/active" -Headers $headers
 Invoke-RestMethod -Method Get -Uri "$base/api/v1/market-watches/active" -Headers $headers
 Invoke-RestMethod -Method Get -Uri "$base/api/v1/audit/decisions" -Headers $headers
-\`\`\`
+```
 
 Expected behavior:
 - Missing/wrong bearer token: 401.
@@ -139,11 +139,11 @@ Expected behavior:
 
 The selected CI-safe test suite is:
 
-\`\`\`powershell
+```powershell
 pytest -q tests/api/test_config.py tests/api/test_database_lifecycle.py tests/api/test_dependencies_auth.py tests/api/test_security.py tests/api/test_endpoints.py tests/api/test_postgres_privileges.py
 python -m compileall -q app/api
 pytest -q test_decision_engine.py test_decision_service.py
-\`\`\`
+```
 
 The PostgreSQL privilege integration test requires SIREADER_TEST_POSTGRES_URL to point to a disposable PostgreSQL database. In GitHub Actions, this is supplied by the ephemeral postgres:16 service container. Do not point that test variable at Supabase or a production database.
 
