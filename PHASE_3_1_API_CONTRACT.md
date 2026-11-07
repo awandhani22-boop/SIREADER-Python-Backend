@@ -281,12 +281,15 @@ Aliasing kolom tetap mengekspos integer sequence asli dari database yang secara 
 +----------------------------------------------------------------------------------------------------+
 |                               STRATEGI TATA KELOLA IDENTIFIER                                      |
 +-------------------------------------+--------------------------------------------------------------+
-| 1. Strategi Opaque Public ID        | Mengonversi ID internal menjadi string hash/token non-urut    |
-|    (Target Architecture / Produksi) | (misal: 'tsk_7m3q1a', 'aud_5p1z9y' via Sqids atau HMAC).     |
-|                                     | - Kelebihan: Proteksi total terhadap enumerasi data.         |
-|                                     | - Konsekuensi Teknis: Membutuhkan encoding/decoding di layer |
-|                                     |   API, atau ekstensi pgcrypto di Supabase. Menambah          |
-|                                     |   kompleksitas kueri pagination berbasis kursor.             |
+| 1. Strategi Opaque Public ID        | Gunakan UUID acak stabil tersimpan atau HMAC-SHA-256 dengan |
+|    (Target Architecture / Produksi) | secret server-side dan versi kunci; bukan encoding integer. |
+|                                     | - Sqids hanya obfuscation yang dapat didekode, BUKAN kontrol|
+|                                     |   keamanan, anonimisasi, atau proteksi enumerasi.           |
+|                                     | - HMAC perlu secret kuat, penyimpanan aman, versi kunci,     |
+|                                     |   dan rencana rotasi; secret tidak boleh ke browser.        |
+|                                     | - UUID acak stabil perlu mapping persisten di database.     |
+|                                     | - Pagination memakai opaque cursor stabil yang mengikat     |
+|                                     |   sort key, arah, dan filter tanpa mengekspos PK internal.  |
 |                                     | - Status: PRASYARAT MUTLAK apabila API dibuka untuk          |
 |                                     |   multi-user, akses publik eksternal, atau browser publik.   |
 +-------------------------------------+--------------------------------------------------------------+
@@ -383,23 +386,28 @@ Aliasing kolom tetap mengekspos integer sequence asli dari database yang secara 
 
 #### B. Audit Persyaratan PostgreSQL & Prosedur Perpindahan Kepemilikan View
 
-Pemeriksaan terhadap aturan internal engine PostgreSQL (`ATExecChangeOwner` pada `commands/tablecmds.c`) mengungkap aturan ketat mengenai perintah `ALTER VIEW ... OWNER TO new_owner`:
+PostgreSQL membedakan jalur perpindahan ownership oleh superuser dan non-superuser. Persyaratan berikut tidak boleh dicampur:
 
-1. **Kewenangan Eksekutor:** Role pengeksekusi perintah `ALTER VIEW ... OWNER TO` harus merupakan pemilik view saat ini atau `SUPERUSER`.
-2. **Kewenangan Terhadap Calon Pemilik:** Apabila pengeksekusi bukan superuser, ia wajib menjadi anggota (member) langsung atau tidak langsung dari role calon pemilik baru (`new_owner`). Superuser dapat melewati pemeriksaan keanggotaan ini.
-3. **Persyaratan Schema CREATE Privilege:** Engine PostgreSQL **mewajibkan calon pemilik baru (`new_owner`) memiliki hak `CREATE` pada skema tempat view berada**, sekalipun perintah perpindahan kepemilikan dijalankan oleh `superuser` (`postgres`). Tanpa hak ini, PostgreSQL menolak eksekusi dengan `ERROR: permission denied for schema <schema_name>`. Hal ini dirancang agar superuser tidak dapat menempatkan kepemilikan objek pada role yang dilarang membuat objek di skema terkait.
-4. **Resolusi Dilema Least Privilege:** Jika `sireader_view_owner` diberi `CREATE` permanen pada skema `public`, hal itu melanggar prinsip *least privilege* karena membuka celah pembuatan objek tak terkontrol. Sebaliknya, jika tidak diberi hak `CREATE`, perintah `ALTER VIEW ... OWNER TO` akan gagal.
+1. **Eksekutor non-superuser:** harus merupakan owner view saat ini atau memiliki kewenangan yang sesuai, serta menjadi anggota langsung/tidak langsung dari role calon owner.
+2. **Calon owner:** pada jalur non-superuser, calon owner harus memiliki privilege `CREATE` pada schema tempat view berada.
+3. **Eksekutor superuser:** superuser dapat mengubah ownership tanpa syarat membership dan tanpa memberikan privilege `CREATE` pada schema kepada calon owner.
+4. **Prasyarat Supabase:** jangan mengasumsikan koneksi SQL Editor bernama `postgres` otomatis memiliki atribut superuser. Verifikasi `rolsuper` untuk role eksekutor terlebih dahulu. Jika bukan superuser, hentikan prosedur dan minta DBA dengan kewenangan yang sesuai.
+5. **Least privilege:** `sireader_view_owner` harus berakhir tanpa `CREATE` pada schema `public`. Jalur superuser di bawah tidak memerlukan grant CREATE sementara.
 
-Oleh karena itu, DBA wajib menerapkan **Prosedur Transisi Kepemilikan 6 Langkah** yang aman, atomik, dan tervalidasi:
+**Prosedur ownership transfer yang ditetapkan (DESAIN ONLY — JANGAN DIEKSEKUSI SEBELUM APPROVAL):**
 
 ```sql
--- LANGKAH 1: DBA (Superuser) membuat keenam View di skema public
--- (DDL keenam view dijalankan sesuai Bagian 3.1)
+-- LANGKAH 0: Verifikasi role eksekutor saat ini benar-benar superuser.
+SELECT current_user, r.rolsuper
+FROM pg_roles r
+WHERE r.rolname = current_user;
+-- Prasyarat: rolsuper = true. Jika false / tidak ada baris: STOP.
 
--- LANGKAH 2: Berikan hak CREATE SEMENTARA pada skema public kepada sireader_view_owner
-GRANT CREATE ON SCHEMA public TO sireader_view_owner;
+-- LANGKAH 1: DBA superuser membuat keenam View di schema public
+-- menggunakan DDL pada Bagian 3.1.
 
--- LANGKAH 3: Pindahkan kepemilikan keenam view kepada sireader_view_owner
+-- LANGKAH 2: Pindahkan ownership. Jalur superuser tidak memerlukan
+-- GRANT CREATE ON SCHEMA public kepada sireader_view_owner.
 ALTER VIEW public.v_api_system_runtime_state OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_telemetry_usage OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_active_in_flight_tasks OWNER TO sireader_view_owner;
@@ -407,21 +415,12 @@ ALTER VIEW public.v_api_queued_pending_messages OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_active_market_watches OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_audit_decisions OWNER TO sireader_view_owner;
 
--- LANGKAH 4: SEGERA CABUT hak CREATE sementara tersebut dari sireader_view_owner
-REVOKE CREATE ON SCHEMA public FROM sireader_view_owner;
-
--- LANGKAH 5: Verifikasi kepastian bahwa sireader_view_owner TIDAK memiliki hak CREATE permanen
+-- LANGKAH 3: Verifikasi owner tidak memiliki CREATE permanen.
 SELECT has_schema_privilege('sireader_view_owner', 'public', 'CREATE') AS view_owner_has_create;
--- Target: WAJIB MENGEMBALIKAN FALSE!
-
--- LANGKAH 6: Berikan hak SELECT pada keenam view kepada role sireader_api_ro
-GRANT SELECT ON public.v_api_system_runtime_state,
-                public.v_api_telemetry_usage,
-                public.v_api_active_in_flight_tasks,
-                public.v_api_queued_pending_messages,
-                public.v_api_active_market_watches,
-                public.v_api_audit_decisions TO sireader_api_ro;
+-- Target: false.
 ```
+
+**Fallback non-superuser (bukan jalur default):** hanya boleh digunakan jika DBA menyetujuinya secara eksplisit. Eksekutor harus memenuhi syarat ownership/membership PostgreSQL; calon owner harus diberi `CREATE` pada schema sebelum transfer; privilege tersebut harus dicabut segera setelah seluruh transfer berhasil. Setelah itu verifikasi `has_schema_privilege(..., 'CREATE') = false`. Jika membership, ownership, atau rollback tidak dapat dipastikan, jangan gunakan fallback.
 
 #### C. Pengaruh Row-Level Security (RLS) terhadap View Owner Non-Superuser
 - Karena `sireader_view_owner` berstatus **`NOSUPERUSER` dan `NOBYPASSRLS`**, PostgreSQL **sepenuhnya menegakkan kebijakan RLS pada tabel dasar terhadap `sireader_view_owner`**.
@@ -445,15 +444,19 @@ GRANT SELECT ON public.v_api_system_runtime_state,
    ```sql
    GRANT CONNECT ON DATABASE postgres TO sireader_api_ro;
    GRANT USAGE ON SCHEMA public TO sireader_api_ro;
+
+   -- REVOKE harus dilakukan SEBELUM GRANT SELECT pada views.
+   -- PostgreSQL mencakup views dalam cakupan ALL TABLES IN SCHEMA.
+   -- Jika REVOKE diletakkan setelah GRANT, akses keenam views ikut tercabut.
+   REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM sireader_api_ro;
+
+   -- Berikan kembali SELECT hanya pada enam approved views.
    GRANT SELECT ON public.v_api_system_runtime_state,
                    public.v_api_telemetry_usage,
                    public.v_api_active_in_flight_tasks,
                    public.v_api_queued_pending_messages,
                    public.v_api_active_market_watches,
                    public.v_api_audit_decisions TO sireader_api_ro;
-
-   -- Pastikan tabel dasar sama sekali tidak bisa dibaca oleh sireader_api_ro
-   REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sireader_api_ro;
    ```
 3. Kriteria Keamanan Akses:
    - `sireader_api_ro` dilarang memiliki hak `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, maupun `TRIGGER` pada tabel dasar, baik di tingkat tabel (*table-level*) maupun tingkat kolom (*column-level*).
@@ -517,10 +520,29 @@ SELECT
 -- ============================================================================
 -- LANGKAH 4: Audit Kebocoran Privilege melalui Pseudo-Role PUBLIC
 -- ============================================================================
-SELECT table_name, privilege_type 
-FROM information_schema.table_privileges 
-WHERE grantee = 'PUBLIC' AND table_schema = 'public';
--- TARGET HASIL: 0 baris (Tidak ada hak SELECT/INSERT/UPDATE/DELETE default pada tabel/view aplikasi untuk PUBLIC).
+SELECT 'TABLE' AS grant_scope, table_name AS object_name, NULL::text AS column_name, privilege_type
+FROM information_schema.table_privileges
+WHERE grantee = 'PUBLIC' AND table_schema = 'public'
+  AND table_name IN (
+      'runtime_control_state', 'ai_usage_logs', 'ai_analysis_logs',
+      'ai_pending_messages', 'trade_decision_watches', 'approval_decisions',
+      'v_api_system_runtime_state', 'v_api_telemetry_usage',
+      'v_api_active_in_flight_tasks', 'v_api_queued_pending_messages',
+      'v_api_active_market_watches', 'v_api_audit_decisions'
+  )
+UNION ALL
+SELECT 'COLUMN' AS grant_scope, table_name AS object_name, column_name, privilege_type
+FROM information_schema.column_privileges
+WHERE grantee = 'PUBLIC' AND table_schema = 'public'
+  AND table_name IN (
+      'runtime_control_state', 'ai_usage_logs', 'ai_analysis_logs',
+      'ai_pending_messages', 'trade_decision_watches', 'approval_decisions',
+      'v_api_system_runtime_state', 'v_api_telemetry_usage',
+      'v_api_active_in_flight_tasks', 'v_api_queued_pending_messages',
+      'v_api_active_market_watches', 'v_api_audit_decisions'
+  );
+-- TARGET HASIL: 0 baris privilege TABLE/COLUMN dari PUBLIC pada enam base tables dan enam views.
+-- Runtime has_table_privilege/has_column_privilege di bawah tetap menjadi bukti privilege efektif.
 
 -- ============================================================================
 -- LANGKAH 5: Verifikasi PRIVILEGE EFEKTIF sireader_api_ro pada Base Tables
@@ -531,7 +553,10 @@ SELECT
     has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'SELECT') AS can_select,
     has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'INSERT') AS can_insert,
     has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'UPDATE') AS can_update,
-    has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'DELETE') AS can_delete
+    has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'DELETE') AS can_delete,
+    has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'TRUNCATE') AS can_truncate,
+    has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'REFERENCES') AS can_reference,
+    has_table_privilege('sireader_api_ro', 'public.' || t.table_name, 'TRIGGER') AS can_trigger
 FROM (
     VALUES 
         ('runtime_control_state'),
@@ -541,21 +566,25 @@ FROM (
         ('trade_decision_watches'),
         ('approval_decisions')
 ) AS t(table_name);
--- TARGET HASIL: 6 baris dengan seluruh nilai boolean WAJIB FALSE!
+-- TARGET HASIL: 6 baris dengan seluruh nilai boolean WAJIB FALSE untuk SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER!
 
--- 5B. Evaluasi Column-Level Effective Privilege pada Seluruh Kolom Base Tables
-SELECT 
+-- 5B. Evaluasi seluruh privilege yang dapat diberikan pada level kolom.
+-- PostgreSQL column-level privileges mencakup SELECT, INSERT, UPDATE, REFERENCES.
+-- DELETE, TRUNCATE, dan TRIGGER hanya diperiksa pada level tabel (query 5A).
+SELECT
     c.table_name,
     c.column_name,
-    has_column_privilege('sireader_api_ro', 'public.' || c.table_name, c.column_name, 'SELECT') AS can_select_column
+    p.privilege_type,
+    has_column_privilege('sireader_api_ro', 'public.' || c.table_name, c.column_name, p.privilege_type) AS has_effective_privilege
 FROM information_schema.columns c
-WHERE c.table_schema = 'public' 
+CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')) AS p(privilege_type)
+WHERE c.table_schema = 'public'
   AND c.table_name IN (
-      'runtime_control_state', 'ai_usage_logs', 'ai_analysis_logs', 
+      'runtime_control_state', 'ai_usage_logs', 'ai_analysis_logs',
       'ai_pending_messages', 'trade_decision_watches', 'approval_decisions'
   )
-  AND has_column_privilege('sireader_api_ro', 'public.' || c.table_name, c.column_name, 'SELECT') = true;
--- TARGET HASIL: WAJIB 0 BARIS (Tidak ada satu kolom pun pada base tables yang dapat diakses).
+  AND has_column_privilege('sireader_api_ro', 'public.' || c.table_name, c.column_name, p.privilege_type) = true;
+-- TARGET HASIL: WAJIB 0 BARIS. Tidak ada privilege kolom efektif pada base tables.
 
 -- ============================================================================
 -- LANGKAH 6: Verifikasi Column-Level Privileges milik sireader_view_owner
@@ -570,14 +599,23 @@ ORDER BY table_name, column_name;
 -- ============================================================================
 -- LANGKAH 7: Verifikasi Kepemilikan View & Hak Akses View Efektif
 -- ============================================================================
-SELECT 
-    v.table_name AS view_name,
-    v.view_owner,
-    has_table_privilege('sireader_api_ro', 'public.' || v.table_name, 'SELECT') AS api_ro_can_select
-FROM information_schema.views v
-WHERE v.table_schema = 'public' AND v.table_name LIKE 'v_api_%'
-ORDER BY v.table_name;
--- TARGET HASIL: 6 baris, seluruh view_owner adalah 'sireader_view_owner', dan api_ro_can_select = true.
+SELECT
+    c.relname AS view_name,
+    owner_role.rolname AS view_owner,
+    has_table_privilege('sireader_api_ro', c.oid, 'SELECT') AS api_ro_can_select
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_roles owner_role ON owner_role.oid = c.relowner
+WHERE n.nspname = 'public'
+  AND c.relkind = 'v'
+  AND c.relname IN (
+      'v_api_system_runtime_state', 'v_api_telemetry_usage',
+      'v_api_active_in_flight_tasks', 'v_api_queued_pending_messages',
+      'v_api_active_market_watches', 'v_api_audit_decisions'
+  )
+ORDER BY c.relname;
+-- TARGET HASIL: tepat 6 baris, seluruh view_owner = 'sireader_view_owner',
+-- dan api_ro_can_select = true. pg_class/pg_roles adalah katalog owner yang valid.
 
 -- ============================================================================
 -- LANGKAH 8: Uji Simulasi Penetrasi Runtime Nyata (Direct Penetration Test)
@@ -1091,7 +1129,7 @@ Implementasi Batch 2 dinyatakan lulus kriteria keamanan jika memenuhi 14 kriteri
 4. **Isolasi Host Binding (Strict 127.0.0.1):** Uvicorn pada deployment lokal wajib melakukan bind ke `127.0.0.1` dan dilarang mengikat ke `0.0.0.0`. Dilarang membuka API Gateway langsung ke internet publik.
 5. **Proteksi Jaringan Privat (Private Network Boundary):** Akses antar-service (misal dari Virtual Office BFF) wajib melalui jaringan privat / VPC terproteksi firewall. Binding `127.0.0.1` tidak diklaim otomatis aman jika reverse proxy meneruskan trafik tanpa filter.
 6. **Exact Token Comparison:** `verify_api_token()` menggunakan perbandingan waktu-konstan persis (`secrets.compare_digest(provided_token, expected_token)`) tanpa `.strip()` pada `provided_token`.
-7. **Zero Base Table SELECT (Effective Privilege Enforcement):** Seluruh kueri dieksekusi HANYA pada 6 View (`v_api_*`). Evaluasi runtime `has_table_privilege()` dan `has_column_privilege()` untuk `sireader_api_ro` pada seluruh base tables bernilai `false`.
+7. **Zero Base Table Privileges (Effective Privilege Enforcement):** Seluruh kueri dieksekusi HANYA pada 6 View (`v_api_*`). `has_table_privilege()` untuk `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, dan `TRIGGER`, serta `has_column_privilege()` untuk `SELECT`, `INSERT`, `UPDATE`, dan `REFERENCES`, pada seluruh base tables harus bernilai `false` bagi `sireader_api_ro`. SELECT pada keenam approved views harus bernilai `true`.
 8. **Pencabutan Hak CREATE Sementara (View Owner Hardening):** `sireader_view_owner` memiliki status permanen `has_schema_privilege('sireader_view_owner', 'public', 'CREATE') = false` setelah pemindahan kepemilikan selesai.
 9. **Zero Foreign Keys Exposed:** `analysis_log_id`, `trade_episode_id`, dan foreign key internal lainnya tidak diekspos di View audit maupun endpoint publik.
 10. **Separation of Currencies:** IDR dan USD dilaporkan terpisah tanpa penjumlahan lintas mata uang pada seluruh total, reservasi, dan model breakdown.
@@ -1109,6 +1147,14 @@ Argon wajib mengimplementasikan pengujian komprehensif di `tests/api/test_endpoi
 ```text
 +------------------------------------+---------------------------------------------------------------+
 | KATEGORI TEST                      | SKENARIO UJI                                                  |
++------------------------------------+---------------------------------------------------------------+
+| Database Privilege (Empirical)    | 1. Uji pada PostgreSQL Supabase aktual, bukan SQLite           |
+|                                    | 2. Semua table privileges terlarang pada base tables -> false  |
+|                                    | 3. Semua column privileges yang berlaku pada base tables -> false|
+|                                    | 4. SELECT keenam approved views -> berhasil                     |
+|                                    | 5. Ownership keenam views = sireader_view_owner                 |
+|                                    | 6. CREATE pada schema public untuk view_owner/api_ro -> false   |
+|                                    | 7. Tidak ada grant PUBLIC atau membership tak disetujui          |
 +------------------------------------+---------------------------------------------------------------+
 | Autentikasi & Jaringan             | 1. Request tanpa header Authorization -> 401                  |
 |                                    | 2. Request dengan scheme bukan Bearer (Basic) -> 401           |
