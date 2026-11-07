@@ -30,11 +30,11 @@ The disposable PostgreSQL 16 GitHub Actions integration test is useful automated
 - Backend main-table privileges for `postgres` and `service_role` were retained. The six observability views have no `service_role` grants.
 - Default table and sequence privileges for objects created by `postgres` in `public` were tightened so future objects are not automatically granted to `anon` or `authenticated`.
 
-**Credential note:** `sireader_api_ro` has LOGIN enabled but no password has been set by the assistant. Set its password privately with the `psql \\password sireader_api_ro` command below before placing the URL in the local `.env`. The Supabase-managed `supabase_admin` default ACL remains platform-managed; this migration path and the SIREADER schema owner use `postgres`.
+**Credential note:** `sireader_api_ro` has LOGIN enabled but no password has been set by the assistant. Set its password privately with the `psql \password sireader_api_ro` command below before placing the URL in the local `.env`. The Supabase-managed `supabase_admin` default ACL remains platform-managed; this migration path and the SIREADER schema owner use `postgres`.
 
 ## 2. Set the dedicated database password
 
-From PowerShell, connect using the existing database administrator credentials. The interactive `\\password` command prompts twice and does not put the new password in the SQL text/history:
+From PowerShell, connect using the existing database administrator credentials. The interactive `\password` command prompts twice and does not put the new password in the SQL text/history:
 
 ```powershell
 psql "host=db.otinrvvfjnyxjvzcmdia.supabase.co port=5432 dbname=postgres user=postgres sslmode=require"
@@ -43,8 +43,8 @@ psql "host=db.otinrvvfjnyxjvzcmdia.supabase.co port=5432 dbname=postgres user=po
 Then, at the `psql` prompt:
 
 ```sql
-\\password sireader_api_ro
-\\q
+\password sireader_api_ro
+\q
 ```
 
 Use a unique random password and keep it private. Do not send it in chat or commit it.
