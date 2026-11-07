@@ -251,8 +251,13 @@ owner_has_role_memberships AS (
     SELECT EXISTS (
         SELECT 1
         FROM pg_auth_members am
-        WHERE am.member = (SELECT oid FROM pg_roles WHERE rolname = 'sireader_view_owner')
-           OR am.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'sireader_view_owner')
+        WHERE (
+            am.member = (SELECT oid FROM pg_roles WHERE rolname = 'sireader_view_owner')
+            OR am.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'sireader_view_owner')
+        )
+          -- PostgreSQL 16+ may retain an ADMIN-only creator membership with
+          -- INHERIT=false and SET=false. It conveys no runtime privileges.
+          AND (am.inherit_option OR am.set_option)
     ) AS has_any
 ),
 owner_unapproved_column_access AS (
@@ -398,7 +403,7 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
     if snapshot.get("owner_base_table_maintain") is not False:
         raise RuntimeError("sireader_view_owner must not have MAINTAIN on protected base tables.")
     if snapshot.get("owner_has_role_memberships") is not False:
-        raise RuntimeError("sireader_view_owner must not be a member of or grant its role to another role.")
+        raise RuntimeError("sireader_view_owner must not have role memberships that grant INHERIT or SET ROLE.")
     if snapshot.get("owner_unapproved_column_access") is not False:
         raise RuntimeError("sireader_view_owner has privileges on unapproved base-table columns.")
     if snapshot.get("owner_column_allowlist_ok") is not True:
