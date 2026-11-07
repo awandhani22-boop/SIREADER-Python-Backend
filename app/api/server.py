@@ -164,6 +164,32 @@ view_rows AS (
       AND c.relkind = 'v'
       AND c.relname IN (SELECT view_name FROM view_names)
 ),
+api_view_write_access AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM view_names v
+        CROSS JOIN table_privileges p
+        WHERE p.privilege_name <> 'SELECT'
+          AND has_table_privilege(
+              current_user,
+              format('public.%I', v.view_name),
+              p.privilege_name
+          )
+    ) AS has_any
+),
+api_view_column_write_access AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM view_names v
+        JOIN pg_class c ON c.relname = v.view_name
+        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+        JOIN pg_attribute a ON a.attrelid = c.oid
+        CROSS JOIN (VALUES ('INSERT'), ('UPDATE'), ('REFERENCES')) AS p(privilege_name)
+        WHERE a.attnum > 0
+          AND NOT a.attisdropped
+          AND has_column_privilege(current_user, c.oid, a.attnum, p.privilege_name)
+    ) AS has_any
+),
 api_base_table_access AS (
     SELECT EXISTS (
         SELECT 1
@@ -300,6 +326,8 @@ SELECT
         SELECT 1 FROM pg_auth_members
         WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)
     ) AS api_has_role_memberships,
+    (SELECT has_any FROM api_view_write_access) AS api_view_write_access,
+    (SELECT has_any FROM api_view_column_write_access) AS api_view_column_write_access,
     (SELECT has_any FROM api_base_table_access) AS api_base_table_access,
     (SELECT has_any FROM api_base_table_maintain_access) AS api_base_table_maintain,
     (SELECT has_any FROM api_base_column_access) AS api_base_column_access,
@@ -356,6 +384,10 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
         raise RuntimeError("sireader_api_ro requires USAGE on schema public.")
     if snapshot.get("api_schema_create") is not False:
         raise RuntimeError("sireader_api_ro must not have CREATE on schema public.")
+    if snapshot.get("api_view_write_access") is not False:
+        raise RuntimeError("sireader_api_ro must not have table-level write privileges on approved views.")
+    if snapshot.get("api_view_column_write_access") is not False:
+        raise RuntimeError("sireader_api_ro must not have column-level write privileges on approved views.")
     if snapshot.get("api_has_role_memberships") is not False:
         raise RuntimeError("sireader_api_ro must not inherit or SET ROLE through memberships.")
     if snapshot.get("api_base_table_access") is not False:
