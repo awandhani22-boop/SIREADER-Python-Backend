@@ -1,0 +1,44 @@
+name: SIREADER API Gateway Tests
+
+on:
+  push:
+    branches:
+      - phase-3-1-api-gateway
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  api-and-core-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run API tests
+        run: |
+          pytest -q \
+            tests/api/test_config.py \
+            tests/api/test_database_lifecycle.py \
+            tests/api/test_dependencies_auth.py \
+            tests/api/test_security.py \
+            tests/api/test_endpoints.py
+
+      - name: Run core regression tests
+        run: |
+          pytest -q test_decision_engine.py test_decision_service.py

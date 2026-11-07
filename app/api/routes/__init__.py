@@ -1,0 +1,11 @@
+"""Route modules untuk endpoint GET observabilitas."""
+from .audit import router as audit_router
+from .market_watches import router as market_watches_router
+from .pipeline import router as pipeline_router
+from .system import router as system_router
+from .telemetry import router as telemetry_router
+
+__all__ = [
+    "audit_router", "market_watches_router", "pipeline_router",
+    "system_router", "telemetry_router",
+]
