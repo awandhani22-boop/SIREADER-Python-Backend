@@ -1,9 +1,11 @@
 """Pengujian siklus hidup koneksi database dan penolakan mutasi (app/api/database.py)."""
 
 import concurrent.futures
+import threading
 import pytest
 from sqlalchemy import text
 from app.api.config import api_settings
+import app.api.database as db_module
 from app.api.database import (
     create_ro_engine,
     ReadOnlySessionFactory,
@@ -119,13 +121,29 @@ def test_get_ro_session_dependency_always_closes():
 
 
 def test_ro_session_factory_concurrent_first_request(monkeypatch):
-    """Memastikan inisialisasi pada first-request concurrent aman terhadap race condition dan hanya membuat satu engine."""
+    """Memastikan inisialisasi pada first-request concurrent dengan barrier aman terhadap race condition dan hanya membuat satu engine."""
     monkeypatch.setattr(api_settings, "SIREADER_API_DATABASE_URL", "sqlite:///:memory:")
     factory = ReadOnlySessionFactory()
     assert factory.is_initialized is False
 
+    # Spy create_ro_engine untuk menghitung pemanggilan pembuatan engine
+    engine_creation_count = 0
+    orig_create_ro_engine = db_module.create_ro_engine
+
+    def spy_create_ro_engine(*args, **kwargs):
+        nonlocal engine_creation_count
+        engine_creation_count += 1
+        return orig_create_ro_engine(*args, **kwargs)
+
+    monkeypatch.setattr(db_module, "create_ro_engine", spy_create_ro_engine)
+
+    num_threads = 10
+    barrier = threading.Barrier(num_threads)
+
     def worker():
         try:
+            # Seluruh thread menunggu di barrier hingga siap, lalu dieksekusi secara serentak
+            barrier.wait(timeout=5)
             sess = factory.get_session()
             val = sess.execute(text("SELECT 100")).scalar()
             sess.close()
@@ -133,13 +151,22 @@ def test_ro_session_factory_concurrent_first_request(monkeypatch):
         except Exception as e:
             return e
 
-    # Jalankan 10 thread secara bersamaan untuk memicu get_session() pada factory uninitialized
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(worker) for _ in range(10)]
+    # Jalankan worker threads secara bersamaan
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(worker) for _ in range(num_threads)]
         results = [f.result() for f in futures]
 
+    # 1. Pastikan engine hanya dibuat tepat satu kali
+    assert engine_creation_count == 1
+
+    # 2. Pastikan seluruh thread memperoleh session valid dan query berhasil
+    assert len(results) == num_threads
     assert all(r == 100 for r in results)
+
+    # 3. Factory terinisialisasi
     assert factory.is_initialized is True
+
+    # 4. Cleanup
     factory.close()
     assert factory.is_initialized is False
 

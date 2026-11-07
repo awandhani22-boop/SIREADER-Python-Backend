@@ -6,7 +6,17 @@ Menerapkan:
 3. Transaksi read-only PostgreSQL (postgresql_readonly=True dan options=-c default_transaction_read_only=on).
 4. Interceptor event SQLAlchemy sebagai defense-in-depth penolakan operasi DML/DDL.
 5. Lazy initialization: import modul tidak mencoba koneksi database live (fail-closed jika URL belum ada).
-6. Thread-safe singleton session factory dengan perlindungan mutasi reinitialization dan concurrent first-request.
+6. Thread-safe session factory untuk concurrent first request dengan aturan lifecycle server yang ketat.
+
+ATURAN SIKLUS HIDUP SERVER (LIFECYCLE RULES):
+1. Inisialisasi Startup: `initialize()` dijalankan saat startup server sebelum API Gateway
+   mulai menerima request HTTP eksternal (atau secara lazy aman pada request pertama).
+2. Larangan Reinisialisasi Runtime: Reinisialisasi (`initialize()`) TIDAK DIPERBOLEHKAN
+   saat server sedang aktif melayani request, karena pergantian engine/pool akan merusak
+   atau memutus sesi koneksi yang sedang aktif berjalan. Jangan mengasumsikan concurrent
+   reinitialization aman untuk sesi aktif.
+3. Penutupan Graceful Shutdown: `close()` hanya dipanggil saat server berhenti menerima
+   request baru dan seluruh request aktif telah selesai diproses.
 
 SECURITY BOUNDARY CRITICAL NOTICE:
 Interceptor SQLAlchemy di modul ini beroperasi murni sebagai mekanisme DEFENSE-IN-DEPTH
@@ -138,13 +148,21 @@ def create_ro_engine(
 class ReadOnlySessionFactory:
     """Factory lazy singleton untuk sessionmaker read-only dengan perlindungan konkurensi.
 
-    Karakteristik:
-    1. Thread-safe initialization: Menggunakan threading.Lock untuk mencegah
-       instansiasi engine ganda saat beberapa request pertama tiba secara bersamaan.
-    2. Zero connection leaks: Reinisialisasi secara eksplisit mendisposisi (dispose)
-       engine dan connection pool lama sebelum membuat yang baru.
-    3. Lazy initialization: Import modul tidak membuka koneksi database atau membaca URL.
-    4. Clean shutdown: Metode close() mendisposisi engine dan mereset sessionmaker.
+    ATURAN SIKLUS HIDUP SERVER (LIFECYCLE RULES):
+    1. Inisialisasi Startup: `initialize()` dijalankan saat startup server sebelum API Gateway
+       mulai menerima request HTTP eksternal (atau secara lazy pada request pertama).
+    2. Larangan Reinisialisasi Runtime: Reinisialisasi (`initialize()`) TIDAK DIPERBOLEHKAN
+       saat server sedang aktif melayani request, karena pergantian engine/pool akan merusak
+       atau memutus sesi koneksi yang sedang aktif berjalan. Jangan mengasumsikan concurrent
+       reinitialization aman untuk sesi aktif.
+    3. Penutupan Graceful Shutdown: `close()` hanya dipanggil saat server berhenti menerima
+       request baru dan seluruh request aktif telah selesai diproses.
+
+    KARAKTERISTIK KEAMANAN THREAD:
+    1. Akses dan pengambilan sessionmaker dilindungi dengan lock yang sama (`self._lock`).
+    2. `get_session()` tidak dapat membaca sessionmaker yang sedang direset oleh `close()`
+       atau `initialize()`.
+    3. Module import tetap murni lazy tanpa menghubungi database.
     """
 
     def __init__(self) -> None:
@@ -153,7 +171,13 @@ class ReadOnlySessionFactory:
         self._lock = threading.Lock()
 
     def _initialize_locked(self, database_url: str | None = None) -> None:
-        """Inisialisasi engine dan session factory internal (pemanggil harus memegang _lock)."""
+        """Inisialisasi engine dan session factory internal (pemanggil harus memegang _lock).
+
+        Catatan Lifecycle:
+        Jika engine sebelumnya ada (misal: dalam pengujian isolasi), engine lama didisposisi
+        untuk membersihkan resource. Namun pada runtime produksi, reinisialisasi dilarang
+        saat API sedang melayani request aktif.
+        """
         if self._engine is not None:
             self._engine.dispose()
             self._engine = None
@@ -168,7 +192,7 @@ class ReadOnlySessionFactory:
         )
 
     def initialize(self, database_url: str | None = None) -> None:
-        """Menginisialisasi engine dan session factory secara eksplisit (thread-safe)."""
+        """Menginisialisasi engine dan session factory secara eksplisit saat startup (thread-safe)."""
         with self._lock:
             self._initialize_locked(database_url=database_url)
 
@@ -178,20 +202,23 @@ class ReadOnlySessionFactory:
             return self._sessionmaker is not None
 
     def get_session(self) -> Session:
-        """Mengembalikan sesi baru secara thread-safe.
+        """Mengembalikan sesi baru di bawah perlindungan lock yang sama.
 
-        Menggunakan double-checked locking agar lazy initialization aman terhadap
-        concurrent first requests tanpa overhead lock pada setiap pemanggilan berikutnya.
+        Akses dan pemanggilan sessionmaker dilindungi secara atomik oleh self._lock:
+        memastikan get_session() tidak dapat membaca sessionmaker yang sedang
+        direset atau didisposisi oleh close() atau initialize() di thread lain.
         """
-        if self._sessionmaker is None:
-            with self._lock:
-                if self._sessionmaker is None:
-                    self._initialize_locked()
-        assert self._sessionmaker is not None
-        return self._sessionmaker()
+        with self._lock:
+            if self._sessionmaker is None:
+                self._initialize_locked()
+            assert self._sessionmaker is not None
+            return self._sessionmaker()
 
     def close(self) -> None:
-        """Membersihkan engine dan koneksi pool secara thread-safe."""
+        """Membersihkan engine dan koneksi pool saat shutdown (thread-safe).
+
+        Dipanggil setelah server berhenti menerima request dan seluruh request aktif selesai.
+        """
         with self._lock:
             if self._engine is not None:
                 self._engine.dispose()
