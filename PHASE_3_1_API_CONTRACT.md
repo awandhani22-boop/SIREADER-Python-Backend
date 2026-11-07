@@ -1306,17 +1306,20 @@ Commit implementasi Batch 2 pada branch `phase-3-1-api-gateway` menambahkan:
 - `app/api/server.py`: FastAPI factory, lifecycle, CORS, fail-closed identity/privilege guard, dan enam bounded view probes.
 - `tests/api/test_endpoints.py`: pengujian endpoint dengan SQLite stand-in.
 - `tests/api/test_security.py`: pengujian exact token comparison.
-- `.github/workflows/api-gateway-tests.yml`: otomatisasi API tests dan core regression.
+- `tests/api/test_postgres_privileges.py`: PostgreSQL 16 integration test pada database disposable CI untuk role attributes, grants, RLS view-owner behavior, six-view execution, public grant detection, base-table denial, dan read-only transaction enforcement.
+- `.github/workflows/api-gateway-tests.yml`: menjalankan API tests, PostgreSQL 16 disposable integration tests, compile, dan core regression.
 
 **Sinkronisasi kontrak yang wajib dipertahankan:**
 1. Startup guard memverifikasi `current_user = sireader_api_ro`, `transaction_read_only = on`, atribut role minimal, dan privilege efektif sebelum API mulai melayani request.
 2. Startup guard menolak privilege efektif pada seluruh base tables/columns, PUBLIC table/column grants pada keenam base tables dan views, membership role pada API login maupun view owner, table/column write privileges pada approved views, privilege tambahan pada view owner di luar allowlist SELECT, dan schema CREATE.
 3. Startup guard memverifikasi keenam approved views dimiliki `sireader_view_owner`, dapat dibaca API, dan berhasil menjalankan bounded SELECT probe sebagai API login.
+4. PostgreSQL 16 CI database adalah container uji sementara yang dibuat ulang untuk setiap workflow run. Hasilnya memvalidasi SQL privilege guard dan pola RLS pada fixture, tetapi TIDAK membuktikan role, grants, policies, extensions, ownership, atau data pada proyek Supabase aktual.
 4. `ModelTelemetryDTO` memuat `cost`, `reserved`, dan `projected` per currency.
 5. `InFlightAnalysisDTO` memuat `liveness_status = IN_FLIGHT_UNCONFIRMED`; field tersebut tidak menyatakan worker OS aktif.
 6. Uji SQLite hanya menguji kontrak aplikasi dan bukan bukti privilege PostgreSQL, view ownership, RLS, atau keberhasilan pada Supabase.
-7. GitHub Actions harus menunjukkan run sukses untuk commit terkait sebelum automated tests dinyatakan lulus.
-8. API server lokal wajib dijalankan melalui `python -m app.api.server`, yang menolak `API_HOST` selain `127.0.0.1`. Deployment BFF remote/private network membutuhkan desain dan review jaringan terpisah.
+7. PostgreSQL 16 disposable CI memberikan bukti integrasi terhadap PostgreSQL dan fixture RLS, tetapi tidak menggantikan verifikasi empiris di Supabase aktual.
+8. GitHub Actions harus menunjukkan run sukses untuk commit terkait sebelum automated tests dinyatakan lulus.
+9. API server lokal wajib dijalankan melalui `python -m app.api.server`, yang menolak `API_HOST` selain `127.0.0.1`. Deployment BFF remote/private network membutuhkan desain dan review jaringan terpisah.
 
 **Batas bukti:** guard runtime tidak membuktikan isi kebijakan RLS maupun bahwa policy menghasilkan row set bisnis yang diharapkan. DBA tetap harus memeriksa `pg_policies` dan menguji hasil baca aktual pada Supabase.
 
