@@ -14,7 +14,21 @@ permissions:
 jobs:
   api-and-core-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sireader_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sireader_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,13 +45,17 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run API tests
+        env:
+          # Disposable PostgreSQL service container. Never points to Supabase.
+          SIREADER_TEST_POSTGRES_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/sireader_ci
         run: |
           pytest -q \
             tests/api/test_config.py \
             tests/api/test_database_lifecycle.py \
             tests/api/test_dependencies_auth.py \
             tests/api/test_security.py \
-            tests/api/test_endpoints.py
+            tests/api/test_endpoints.py \
+            tests/api/test_postgres_privileges.py
 
       - name: Compile API package
         run: |
