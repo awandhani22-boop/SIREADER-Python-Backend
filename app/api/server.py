@@ -69,28 +69,19 @@ protected_objects(object_name) AS (
 public_table_grants AS (
     SELECT EXISTS (
         SELECT 1
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        CROSS JOIN LATERAL aclexplode(
-            COALESCE(c.relacl, acldefault('r', c.relowner))
-        ) acl
-        WHERE n.nspname = 'public'
-          AND c.relname IN (SELECT object_name FROM protected_objects)
-          AND acl.grantee = 0
+        FROM information_schema.table_privileges
+        WHERE grantee = 'PUBLIC'
+          AND table_schema = 'public'
+          AND table_name IN (SELECT object_name FROM protected_objects)
     ) AS has_any
 ),
 public_column_grants AS (
     SELECT EXISTS (
         SELECT 1
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_attribute a ON a.attrelid = c.oid
-        CROSS JOIN LATERAL aclexplode(COALESCE(a.attacl, '{}'::aclitem[])) acl
-        WHERE n.nspname = 'public'
-          AND c.relname IN (SELECT object_name FROM protected_objects)
-          AND a.attnum > 0
-          AND NOT a.attisdropped
-          AND acl.grantee = 0
+        FROM information_schema.column_privileges
+        WHERE grantee = 'PUBLIC'
+          AND table_schema = 'public'
+          AND table_name IN (SELECT object_name FROM protected_objects)
     ) AS has_any
 ),
 view_owner_columns(table_name, column_name) AS (
