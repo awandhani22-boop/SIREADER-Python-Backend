@@ -20,7 +20,7 @@ The disposable PostgreSQL 16 GitHub Actions integration test is useful automated
 ### 1.1 Live Supabase verification record
 
 - Project: `otinrvvfjnyxjvzcmdia` (PostgreSQL 17.11).
-- Applied migrations: `phase_3_1_read_only_observability_public_lockdown` and `phase_3_1_enable_dedicated_api_login`.
+- Applied migrations: `phase_3_1_read_only_observability_public_lockdown`, `phase_3_1_enable_dedicated_api_login`, and `index_signal_setups_source_message_fk`.
 - RLS is enabled on all 15 public tables.
 - `anon`, `authenticated`, and `PUBLIC` have zero table grants on public tables and the six API views.
 - The six `v_api_*` views are owned by `sireader_view_owner`; it is NOLOGIN, NOINHERIT, NOBYPASSRLS, and has only the 49 allowlisted column-level SELECT grants across six base tables.
@@ -29,6 +29,7 @@ The disposable PostgreSQL 16 GitHub Actions integration test is useful automated
 - Observed row counts (metadata only): runtime 1, telemetry 46, in-flight 0, queue 0, market watches 0, audit decisions 2.
 - Backend main-table privileges for `postgres` and `service_role` were retained. The six observability views have no `service_role` grants.
 - Default table and sequence privileges for objects created by `postgres` in `public` were tightened so future objects are not automatically granted to `anon` or `authenticated`.
+- Post-change Security Advisor has no `rls_disabled_in_public` finding. Nine `rls_enabled_no_policy` INFO findings are intentional deny-by-default tables. The missing `signal_setups.source_message_id` foreign-key index was added; the unindexed-FK warning is gone. Sixteen unused-index INFO findings remain and were not removed.
 
 **Credential note:** `sireader_api_ro` has LOGIN enabled but no password has been set by the assistant. Set its password privately with the `psql \password sireader_api_ro` command below before placing the URL in the local `.env`. The Supabase-managed `supabase_admin` default ACL remains platform-managed; this migration path and the SIREADER schema owner use `postgres`.
 
