@@ -1,12 +1,12 @@
 # SIREADER Phase 3.1 — Batch 2 Architecture & API Contract
-## Spesifikasi Desain & Kontrak API Observabilitas Read-Only (Revised Contract)
+## Spesifikasi Desain & Kontrak API Observabilitas Read-Only (Final Targeted Revision)
 
 - **Status Dokumen:** `APPROVED FOR IMPLEMENTATION PLANNING` (Design-Only Revision)
 - **Target Role Pelaksana:** Argon (Backend Developer — Batch 2 Implementation)
 - **Target Repository:** `awandhani22-boop/SIREADER-Python-Backend`
 - **Target Branch:** `phase-3-1-api-gateway`
 - **Referensi Arsitektur Induk:** `docs/PHASE_3_ARCHITECTURE.md` (Commit `223d592` pada repo Virtual Office)
-- **Prinsip Utama:** 100% Read-Only Observability, Database Boundary Sanitization, Zero Direct Base Table Access, Zero Synthetic Data, Non-Fabricated Liveness.
+- **Prinsip Utama:** 100% Read-Only Observability, Database Boundary Sanitization, Zero Direct Base Table Access, Strict Identifier Sanitization, Unconfirmed Liveness Transparency.
 
 ---
 
@@ -77,9 +77,9 @@ Rancangan SQL View pada dokumen Phase 3.0 lama mengandung banyak kolom fiktif ya
 
 ---
 
-## 3. Arsitektur Enam Database Views (Database Boundary Sanitization)
+## 3. Arsitektur Enam Database Views & Spesifikasi DDL
 
-Untuk menegakkan isolasi keamanan tingkat database, seluruh sanitasi privasi diterapkan **pada level SQL View**, sehingga data sensitif tidak pernah keluar dari batas database ke memori API.
+Untuk menegakkan isolasi keamanan tingkat database, seluruh sanitasi privasi diterapkan **pada level SQL View**, sehingga data sensitif dan ID internal yang tidak relevan tidak pernah keluar dari batas database ke memori API Gateway.
 
 Desain arsitektur menetapkan **ENAM (6) VIEW DATABASE**:
 
@@ -111,12 +111,12 @@ flowchart TD
         E5["GET /api/v1/audit/decisions"]
     end
 
-    T1 -->|Strips updated_by| V1
-    T2 -->|Strips request_id, analysis_log_id, error_message| V2
-    T3 -->|Filter status=PROCESSING, Strips result_json & error| V3
-    T4 -->|Filter status PENDING/CLAIMED, Strips claimed_by & last_error| V4
-    T5 -->|Filter WAITING/RECHECKING, Strips broker_server & last_reason| V5
-    T6 -->|Strips reviewer & note, injects generic role| V6
+    T1 -->|Strips id, updated_by| V1
+    T2 -->|Strips id, request_id, analysis_log_id, error_message| V2
+    T3 -->|Filter status=PROCESSING, Strips chat_id, target_msg_id, result_json, error| V3
+    T4 -->|Filter status PENDING/CLAIMED, CASE allowlist reason, Strips claimed_by, last_error| V4
+    T5 -->|Filter WAITING/RECHECKING, Strips broker_server, last_reason, internal FKs| V5
+    T6 -->|Strips analysis_log_id, reviewer, note, injects generic role| V6
 
     V1 --> E1
     V2 --> E2
@@ -139,11 +139,10 @@ flowchart TD
 -- ------------------------------------------------------------
 -- 1. View Runtime State
 -- Sumber: runtime_control_state
--- Sanitasi: Mengecualikan updated_by (Telegram User ID)
+-- Sanitasi: Mengecualikan id (singleton internal) dan updated_by (Telegram User ID)
 -- ------------------------------------------------------------
 CREATE OR REPLACE VIEW v_api_system_runtime_state AS
     SELECT 
-        id,
         execution_mode,
         trading_mode,
         auto_execution_enabled,
@@ -186,15 +185,14 @@ CREATE OR REPLACE VIEW v_api_telemetry_usage AS
 -- Sanitasi:
 --   - Filter ketat: HANYA baris status = 'PROCESSING'
 --   - Mengecualikan chat_id, target_message_id, result_json, error_message
---   - Proyeksi boolean has_checkpoint tanpa mengekspos isi payload
+--   - Menghapus klaim fiktif has_checkpoint
 -- ------------------------------------------------------------
 CREATE OR REPLACE VIEW v_api_active_in_flight_tasks AS
     SELECT 
-        id AS analysis_log_id,
+        id AS task_id,
         status,
         created_at,
-        EXTRACT(EPOCH FROM (now() - created_at)) AS elapsed_seconds,
-        (result_json IS NOT NULL) AS has_checkpoint
+        EXTRACT(EPOCH FROM (now() - created_at)) AS elapsed_seconds
     FROM public.ai_analysis_logs
     WHERE status = 'PROCESSING';
 
@@ -205,13 +203,17 @@ CREATE OR REPLACE VIEW v_api_active_in_flight_tasks AS
 --   - Filter ketat: HANYA status IN ('PENDING', 'CLAIMED')
 --   - Mengecualikan dedup_key, chat_id, telegram_message_id, 
 --     analysis_log_id, claimed_by, last_error, next_attempt_at
---   - Menggunakan reason sebagai stable allowlisted error code
+--   - CASE allowlist ketat pada queue_reason (dilarang meneruskan teks bebas)
 -- ------------------------------------------------------------
 CREATE OR REPLACE VIEW v_api_queued_pending_messages AS
     SELECT 
-        id AS pending_id,
+        id AS queue_item_id,
         status,
-        reason AS queue_reason,
+        CASE 
+            WHEN reason = 'BLOCKED_HARD_BUDGET' THEN 'BLOCKED_HARD_BUDGET'
+            WHEN reason = 'MANUAL_REVIEW_BUDGET' THEN 'MANUAL_REVIEW_BUDGET'
+            ELSE 'OTHER'
+        END AS queue_reason,
         attempts,
         claimed_at,
         created_at,
@@ -248,13 +250,13 @@ CREATE OR REPLACE VIEW v_api_active_market_watches AS
 -- 6. View Audit Decisions
 -- Sumber: approval_decisions
 -- Sanitasi:
+--   - Mengecualikan analysis_log_id (internal FK)
 --   - Mengecualikan reviewer (Telegram User/Username) dan note (internal note)
 --   - Memproyeksikan label peran generik langsung di level database view
 -- ------------------------------------------------------------
 CREATE OR REPLACE VIEW v_api_audit_decisions AS
     SELECT 
         id AS audit_id,
-        analysis_log_id,
         decision,
         previous_status,
         new_status,
@@ -265,46 +267,142 @@ CREATE OR REPLACE VIEW v_api_audit_decisions AS
 
 ---
 
-### 3.2 Analisis Keamanan Role Kepemilikan View (Role Security Hardening)
+### 3.2 Audit Komprehensif Identifier Internal (Internal Identifiers Governance)
 
-#### Koreksi Fundamental:
-Dokumen lama mengasumsikan bahwa kepemilikan view oleh `postgres` membuat view "terlindungi secara matematis". **Klaim tersebut salah dan berbahaya**, karena `postgres` adalah superuser yang mengabaikan Row-Level Security (RLS) dan memiliki wewenang penuh tanpa batas. Jika view dibuat oleh superuser, konteks eksekusi view definer dapat membocorkan privilege eskalasi secara tidak sengaja.
+Sesuai arahan arsitektur, seluruh identifier database dievaluasi secara ketat: mana yang diizinkan untuk identitas UI dan mana yang wajib disensor penuh:
 
-#### Model Arsitektur Role View yang Direkomendasikan:
-Untuk menegakkan isolasi hak akses minimum (*Principle of Least Privilege*), rancangan menetapkan pembagian 2 role database:
+| View Name | Kolom Database Asli | Dipublikasikan ke API? | Nama Field Publik | Justifikasi Arsitektur |
+|---|---|---|---|---|
+| `v_api_system_runtime_state` | `runtime_control_state.id` | **TIDAK** | *Dihapus* | Singleton state (baris tunggal). UI tidak memerlukan ID baris. |
+| `v_api_telemetry_usage` | `ai_usage_logs.id` | **TIDAK** | *Dihapus* | Data telemetri murni berupa agregasi metrik. ID baris tidak memiliki nilai observasi. |
+| `v_api_telemetry_usage` | `ai_usage_logs.request_id` | **TIDAK** | *Dihapus* | ID internal tracking provider AI. Berisiko membocorkan format internal payload. |
+| `v_api_telemetry_usage` | `ai_usage_logs.analysis_log_id` | **TIDAK** | *Dihapus* | Foreign key relasional internal yang tidak relevan untuk ringkasan biaya. |
+| `v_api_active_in_flight_tasks`| `ai_analysis_logs.id` | **YA** | `task_id` | **Surrogate Key UI:** Dibutuhkan oleh Three.js & React sebagai React `key` unik per item in-flight. |
+| `v_api_active_in_flight_tasks`| `chat_id`, `target_message_id`| **TIDAK** | *Dihapus* | Identitas privat Telegram mentor dan channel. Disensor total. |
+| `v_api_queued_pending_messages`| `ai_pending_messages.id`| **YA** | `queue_item_id` | **Surrogate Key UI:** Dibutuhkan oleh Virtual Office untuk render daftar antrean pending. |
+| `v_api_queued_pending_messages`| `dedup_key`, `chat_id`, `telegram_message_id`, `analysis_log_id`| **TIDAK** | *Dihapus* | Seluruh identitas privat pesan sumber dan foreign key internal disensor total. |
+| `v_api_active_market_watches` | `trade_decision_watches.id` | **YA** | `watch_id` | **Surrogate Key UI:** Dibutuhkan untuk identitas radar pemantau spread aktif pada workstation. |
+| `v_api_active_market_watches` | `analysis_log_id`, `trade_episode_id` | **TIDAK** | *Dihapus* | Foreign key relasi internal yang membocorkan ID urutan tabel transaksional. Disensor penuh. |
+| `v_api_audit_decisions` | `approval_decisions.id` | **YA** | `audit_id` | **Surrogate Key UI:** Dibutuhkan untuk cursor pagination dan React list keying audit log. |
+| `v_api_audit_decisions` | `approval_decisions.analysis_log_id` | **TIDAK** | *Dihapus* | **Koreksi Kritis:** Menghubungkan audit approver ke ID internal analysis log dihapus total dari View dan DTO. |
 
-```text
-+------------------------------------------------------------------------------------+
-|               PEMBAGIAN ROLE DATABASE KHUSUS OBSERVABILITAS                       |
-+------------------------------------------------------------------------------------+
-| 1. Role Pemilik View: 'sireader_view_owner'                                        |
-|    - Atribut: NOLOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOREPLICATION,      |
-|               NOBYPASSRLS, NOINHERIT                                               |
-|    - Kepemilikan: Pemilik 6 objek View (v_api_*). BUKAN pemilik tabel dasar.       |
-|    - Privilege: Diberikan GRANT SELECT HANYA pada kolom-kolom yang didefinisikan   |
-|                 di dalam 6 View (Column-Level Grant pada tabel dasar).             |
-|                                                                                    |
-| 2. Role Akses API Gateway: 'sireader_api_ro'                                       |
-|    - Atribut: LOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOREPLICATION,        |
-|               NOBYPASSRLS, NOINHERIT                                               |
-|    - Privilege: Diberikan GRANT SELECT HANYA pada 6 View (v_api_*).                |
-|    - Hak Tabel Dasar: ZERO PRIVILEGES (REVOKE ALL ON BASE TABLES).                 |
-+------------------------------------------------------------------------------------+
+---
+
+### 3.3 Analisis & Prosedur Keamanan Role View (Role Security Hardening)
+
+#### A. Prosedur Pemberian Hak Akses Terbatas kepada `sireader_view_owner`
+1. `sireader_view_owner` adalah role internal `NOLOGIN` yang **bukan pemilik tabel dasar**:
+   ```sql
+   CREATE ROLE sireader_view_owner WITH
+       NOLOGIN
+       NOSUPERUSER
+       NOCREATEDB
+       NOCREATEROLE
+       NOREPLICATION
+       NOBYPASSRLS
+       NOINHERIT;
+   ```
+2. Pemilik tabel dasar (`postgres` atau `supabase_admin`) mencabut seluruh privilege dan hanya memberikan `GRANT SELECT` pada kolom-kolom tertentu (*Column-Level Privileges*):
+   ```sql
+   REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sireader_view_owner;
+   GRANT USAGE ON SCHEMA public TO sireader_view_owner;
+
+   -- 1. runtime_control_state
+   GRANT SELECT (execution_mode, trading_mode, auto_execution_enabled, auto_paused, updated_at)
+       ON public.runtime_control_state TO sireader_view_owner;
+
+   -- 2. ai_usage_logs
+   GRANT SELECT (usage_date, provider, model, tier, input_tokens, output_tokens, cache_read_tokens, 
+                 cache_write_tokens, thinking_tokens, billing_currency, cost_rp, reserved_rp, 
+                 cost_usd, reserved_usd, status, created_at, completed_at)
+       ON public.ai_usage_logs TO sireader_view_owner;
+
+   -- 3. ai_analysis_logs
+   GRANT SELECT (id, status, created_at)
+       ON public.ai_analysis_logs TO sireader_view_owner;
+
+   -- 4. ai_pending_messages
+   GRANT SELECT (id, status, reason, attempts, claimed_at, created_at, updated_at)
+       ON public.ai_pending_messages TO sireader_view_owner;
+
+   -- 5. trade_decision_watches
+   GRANT SELECT (id, symbol, status, spread_pips, maximum_spread_pips, last_bid, last_ask, 
+                 check_count, last_checked_at, next_check_at, created_at, updated_at)
+       ON public.trade_decision_watches TO sireader_view_owner;
+
+   -- 6. approval_decisions
+   GRANT SELECT (id, decision, previous_status, new_status, created_at)
+       ON public.approval_decisions TO sireader_view_owner;
+   ```
+
+#### B. Prosedur Perpindahan Kepemilikan View
+Setelah keenam View dibuat di database oleh DBA, kepemilikannya dialihkan secara eksplisit ke `sireader_view_owner`:
+```sql
+ALTER VIEW public.v_api_system_runtime_state OWNER TO sireader_view_owner;
+ALTER VIEW public.v_api_telemetry_usage OWNER TO sireader_view_owner;
+ALTER VIEW public.v_api_active_in_flight_tasks OWNER TO sireader_view_owner;
+ALTER VIEW public.v_api_queued_pending_messages OWNER TO sireader_view_owner;
+ALTER VIEW public.v_api_active_market_watches OWNER TO sireader_view_owner;
+ALTER VIEW public.v_api_audit_decisions OWNER TO sireader_view_owner;
 ```
 
-#### Evaluasi Default View Security (Definer) vs `security_invoker = true`:
-1. **Model `security_invoker = true` (PostgreSQL 15+):**
-   - Jika view menggunakan `WITH (security_invoker = true)`, PostgreSQL mengevaluasi hak akses tabel dasar berdasarkan pengguna pemanggil (*invoker*), yaitu `sireader_api_ro`.
-   - **Konsekuensi:** `sireader_api_ro` **harus diberikan izin SELECT pada tabel dasar**. Jika izin tabel dasar diberikan, maka proteksi view menjadi rapuh karena jika ada celah injection atau query kustom, `sireader_api_ro` dapat membaca tabel dasar langsung.
-2. **Model Default View Security (Definer Mode dengan Non-Superuser Owner):**
-   - View dibuat oleh `sireader_view_owner` (non-superuser, non-login).
-   - Hak akses tabel dasar hanya dimiliki oleh `sireader_view_owner`.
-   - `sireader_api_ro` hanya memiliki hak membaca view.
-   - **Hasil:** `sireader_api_ro` tidak dapat menyentuh tabel dasar sama sekali. Jika mencoba `SELECT * FROM public.approval_decisions;`, database PostgreSQL langsung menolak dengan:
-     `ERROR: permission denied for table approval_decisions`.
-3. **Peringatan Verifikasi Empiris:**
-   - Desain ini **TIDAK BOLEH DIKLAIM AMAN** sebelum diuji dan diverifikasi secara langsung pada instance PostgreSQL Supabase riil pada Milestone 3.1.
-   - Skrip SQL verifikasi hak akses pada `docs/PHASE_3_ARCHITECTURE.md:128-141` tetap menjadi syarat kelulusan audit empiris.
+#### C. Pengaruh Row-Level Security (RLS) terhadap View Owner Non-Superuser
+- Karena `sireader_view_owner` berstatus **`NOSUPERUSER` dan `NOBYPASSRLS`**, PostgreSQL **sepenuhnya menegakkan kebijakan RLS pada tabel dasar terhadap `sireader_view_owner`**.
+- Jika tabel dasar memiliki RLS aktif (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY`), maka DBA wajib membuat policy `FOR SELECT TO sireader_view_owner` pada tabel dasar, atau kueri view akan menghasilkan 0 baris (*empty set*).
+- Hal ini merupakan keunggulan keamanan besar dibanding kepemilikan oleh superuser `postgres`, karena RLS tidak pernah dilewati secara diam-diam.
+
+#### D. Hak Akses Role API Gateway (`sireader_api_ro`)
+1. Role `sireader_api_ro` dibuat dengan hak login tetapi terkunci penuh:
+   ```sql
+   CREATE ROLE sireader_api_ro WITH
+       LOGIN
+       NOSUPERUSER
+       NOCREATEDB
+       NOCREATEROLE
+       NOREPLICATION
+       NOBYPASSRLS
+       NOINHERIT
+       PASSWORD '<managed-ro-secret>';
+   ```
+2. Diberikan hak `CONNECT` dan `USAGE`, serta `SELECT` **HANYA PADA KEENAM VIEW**:
+   ```sql
+   GRANT CONNECT ON DATABASE postgres TO sireader_api_ro;
+   GRANT USAGE ON SCHEMA public TO sireader_api_ro;
+   GRANT SELECT ON public.v_api_system_runtime_state,
+                   public.v_api_telemetry_usage,
+                   public.v_api_active_in_flight_tasks,
+                   public.v_api_queued_pending_messages,
+                   public.v_api_active_market_watches,
+                   public.v_api_audit_decisions TO sireader_api_ro;
+
+   -- Pastikan tabel dasar sama sekali tidak bisa dibaca oleh sireader_api_ro
+   REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sireader_api_ro;
+   ```
+
+#### E. Skrip Audit Verifikasi Privilege Efektif (Empirical Verification Protocol)
+Sebelum sistem dinyatakan aman, DBA wajib menjalankan verifikasi berikut di Supabase pada Milestone 3.1:
+```sql
+-- 1. Verifikasi membership (keduanya harus 0 baris, bebas dari role istimewa)
+SELECT * FROM pg_auth_members WHERE member IN ('sireader_view_owner'::regrole, 'sireader_api_ro'::regrole);
+
+-- 2. Verifikasi kepemilikan view (seluruh 6 view harus dimiliki sireader_view_owner)
+SELECT table_name, view_owner 
+FROM information_schema.views 
+WHERE table_schema = 'public' AND table_name LIKE 'v_api_%';
+
+-- 3. Verifikasi ketiadaan hak SELECT sireader_api_ro pada tabel dasar (harus 0 baris)
+SELECT table_name, privilege_type 
+FROM information_schema.table_privileges 
+WHERE grantee = 'sireader_api_ro' 
+  AND table_schema = 'public' 
+  AND table_name NOT LIKE 'v_api_%';
+
+-- 4. Verifikasi penetrasi langsung (harus gagal dengan permission denied):
+-- SET ROLE sireader_api_ro;
+-- SELECT * FROM public.approval_decisions; -- WAJIB ERROR: permission denied
+-- SELECT * FROM public.v_api_audit_decisions; -- WAJIB SUKSES
+-- RESET ROLE;
+```
 
 ---
 
@@ -313,7 +411,7 @@ Untuk menegakkan isolasi hak akses minimum (*Principle of Least Privilege*), ran
 Argon wajib mengimplementasikan seluruh pembacaan data di `app/api/` **HANYA melalui 6 View yang disetujui**. Dilarang mengimpor model ORM dari `app/database/models.py` untuk eksekusi kueri pada route handler.
 
 ### 4.1 Deklarasi View Models (`app/api/views.py`)
-Argon akan mendefinisikan mapping deklaratif khusus untuk ke-6 View menggunakan SQLAlchemy `Table` atau class deklaratif ringan:
+Argon akan mendefinisikan mapping deklaratif khusus untuk ke-6 View menggunakan SQLAlchemy `Table` (Core) yang ringan:
 
 ```python
 """Definisi skema View SQL untuk SIREADER Read-Only API Gateway.
@@ -330,7 +428,6 @@ metadata = MetaData()
 v_api_system_runtime_state = Table(
     "v_api_system_runtime_state",
     metadata,
-    Column("id", Integer, primary_key=True),
     Column("execution_mode", String),
     Column("trading_mode", String),
     Column("auto_execution_enabled", Boolean),
@@ -365,18 +462,17 @@ v_api_telemetry_usage = Table(
 v_api_active_in_flight_tasks = Table(
     "v_api_active_in_flight_tasks",
     metadata,
-    Column("analysis_log_id", Integer, primary_key=True),
+    Column("task_id", Integer, primary_key=True),
     Column("status", String),
     Column("created_at", DateTime(timezone=True)),
     Column("elapsed_seconds", Numeric),
-    Column("has_checkpoint", Boolean),
 )
 
 # 4. View Queued Messages
 v_api_queued_pending_messages = Table(
     "v_api_queued_pending_messages",
     metadata,
-    Column("pending_id", Integer, primary_key=True),
+    Column("queue_item_id", Integer, primary_key=True),
     Column("status", String),
     Column("queue_reason", String),
     Column("attempts", Integer),
@@ -408,7 +504,6 @@ v_api_audit_decisions = Table(
     "v_api_audit_decisions",
     metadata,
     Column("audit_id", Integer, primary_key=True),
-    Column("analysis_log_id", Integer),
     Column("decision", String),
     Column("previous_status", String),
     Column("new_status", String),
@@ -419,20 +514,7 @@ v_api_audit_decisions = Table(
 
 ---
 
-## 5. Kontrak Lima Endpoint & Pemetaan ke Enam View
-
-```text
-+------------------------------------+---------------------------------------+
-| ENDPOINT HTTP (GET ONLY)           | DATABASE VIEW YANG DIKONSUMSI         |
-+------------------------------------+---------------------------------------+
-| 1. /api/v1/system/status           | v_api_system_runtime_state            |
-| 2. /api/v1/telemetry/usage         | v_api_telemetry_usage                 |
-| 3. /api/v1/pipeline/active         | v_api_active_in_flight_tasks DAN      |
-|                                    | v_api_queued_pending_messages         |
-| 4. /api/v1/market-watches/active   | v_api_active_market_watches           |
-| 5. /api/v1/audit/decisions         | v_api_audit_decisions                 |
-+------------------------------------+---------------------------------------+
-```
+## 5. Kontrak Lima Endpoint & Desain Kueri Agregasi
 
 ---
 
@@ -440,7 +522,7 @@ v_api_audit_decisions = Table(
 - **View Sumber:** `v_api_system_runtime_state`.
 - **Kueri:**
   ```python
-  stmt = select(v_api_system_runtime_state).order_by(v_api_system_runtime_state.c.id.asc()).limit(1)
+  stmt = select(v_api_system_runtime_state).limit(1)
   row = session.execute(stmt).mappings().first()
   ```
 - **Penanganan Nullable & Fallback:**
@@ -477,29 +559,72 @@ class SystemStatusResponse(BaseModel):
   - IDR dan USD **TIDAK BOLEH DIJUMLAHKAN**.
   - Tanggal evaluasi mengikuti zona waktu `Asia/Jakarta`.
   - Mengelompokkan berdasarkan `billing_currency`.
-- **Kueri:**
-  ```python
-  stmt = (
-      select(
-          v_api_telemetry_usage.c.billing_currency,
-          func.coalesce(func.sum(v_api_telemetry_usage.c.cost_rp), 0).label("total_cost_rp"),
-          func.coalesce(func.sum(v_api_telemetry_usage.c.reserved_rp), 0).label("total_reserved_rp"),
-          func.coalesce(func.sum(v_api_telemetry_usage.c.cost_usd), 0).label("total_cost_usd"),
-          func.coalesce(func.sum(v_api_telemetry_usage.c.reserved_usd), 0).label("total_reserved_usd"),
-          func.coalesce(func.sum(v_api_telemetry_usage.c.input_tokens), 0).label("total_input"),
-          func.coalesce(func.sum(v_api_telemetry_usage.c.output_tokens), 0).label("total_output"),
-          func.coalesce(func.sum(v_api_telemetry_usage.c.cache_read_tokens), 0).label("total_cache_read"),
-          func.coalesce(func.sum(v_api_telemetry_usage.c.cache_write_tokens), 0).label("total_cache_write"),
-          func.coalesce(func.sum(v_api_telemetry_usage.c.thinking_tokens), 0).label("total_thinking"),
-          func.count().label("total_requests"),
-      )
-      .where(
-          v_api_telemetry_usage.c.usage_date >= start_date,
-          v_api_telemetry_usage.c.usage_date <= end_date,
-      )
-      .group_by(v_api_telemetry_usage.c.billing_currency)
-  )
-  ```
+
+#### Desain Kueri Lengkap Tiga Tahap:
+Argon akan mengeksekusi 3 kueri agregasi terpisah dalam 1 sesi read-only untuk mengisi seluruh field DTO:
+
+```python
+# Kueri 1: Agregasi per Mata Uang (Totals & Token Breakdown)
+stmt_currency = (
+    select(
+        v_api_telemetry_usage.c.billing_currency,
+        func.coalesce(func.sum(v_api_telemetry_usage.c.cost_rp), 0).label("total_cost_rp"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.reserved_rp), 0).label("total_reserved_rp"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.cost_usd), 0).label("total_cost_usd"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.reserved_usd), 0).label("total_reserved_usd"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.input_tokens), 0).label("input_tokens"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.output_tokens), 0).label("output_tokens"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.cache_read_tokens), 0).label("cache_read_tokens"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.cache_write_tokens), 0).label("cache_write_tokens"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.thinking_tokens), 0).label("thinking_tokens"),
+        func.count().label("total_requests"),
+    )
+    .where(
+        v_api_telemetry_usage.c.usage_date >= start_date,
+        v_api_telemetry_usage.c.usage_date <= end_date,
+    )
+    .group_by(v_api_telemetry_usage.c.billing_currency)
+)
+
+# Kueri 2: Distribusi Status Request per Mata Uang
+stmt_status = (
+    select(
+        v_api_telemetry_usage.c.billing_currency,
+        v_api_telemetry_usage.c.status,
+        func.count().label("status_count"),
+    )
+    .where(
+        v_api_telemetry_usage.c.usage_date >= start_date,
+        v_api_telemetry_usage.c.usage_date <= end_date,
+    )
+    .group_by(v_api_telemetry_usage.c.billing_currency, v_api_telemetry_usage.c.status)
+)
+
+# Kueri 3: Rincian Pemakaian per Model dan Tier
+stmt_models = (
+    select(
+        v_api_telemetry_usage.c.billing_currency,
+        v_api_telemetry_usage.c.model,
+        v_api_telemetry_usage.c.tier,
+        func.count().label("requests"),
+        case(
+            (v_api_telemetry_usage.c.billing_currency == 'USD', func.coalesce(func.sum(v_api_telemetry_usage.c.cost_usd), 0)),
+            else_=func.coalesce(func.sum(v_api_telemetry_usage.c.cost_rp), 0),
+        ).label("cost"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.input_tokens), 0).label("input_tokens"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.output_tokens), 0).label("output_tokens"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.cache_read_tokens), 0).label("cache_read_tokens"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.cache_write_tokens), 0).label("cache_write_tokens"),
+        func.coalesce(func.sum(v_api_telemetry_usage.c.thinking_tokens), 0).label("thinking_tokens"),
+    )
+    .where(
+        v_api_telemetry_usage.c.usage_date >= start_date,
+        v_api_telemetry_usage.c.usage_date <= end_date,
+    )
+    .group_by(v_api_telemetry_usage.c.billing_currency, v_api_telemetry_usage.c.model, v_api_telemetry_usage.c.tier)
+    .order_by(func.count().desc())
+)
+```
 
 #### Pydantic Schema (`TelemetryUsageResponse`)
 ```python
@@ -522,7 +647,7 @@ class CurrencyTelemetryDTO(BaseModel):
     total_projected: Decimal = Field(description="Total aktual + reservasi")
     total_requests: int = Field(description="Total permintaan AI")
     tokens: TokenBreakdownDTO = Field(description="Rincian token")
-    status_counts: Dict[str, int] = Field(description="Distribusi status request")
+    status_counts: Dict[str, int] = Field(description="Distribusi status request (COMPLETED, FAILED, dll)")
 
 class ModelTelemetryDTO(BaseModel):
     model: str = Field(description="Nama model AI")
@@ -546,10 +671,6 @@ class TelemetryUsageResponse(BaseModel):
 - **Views Sumber:**
   1. `v_api_active_in_flight_tasks`
   2. `v_api_queued_pending_messages`
-- **Semantik Liveness:**
-  - `status = 'PROCESSING'` hanya menunjukkan record berada pada status tersebut di database.
-  - `elapsed_seconds` dihitung dari `created_at` untuk mengukur usia record, **bukan detak heartbeat worker**.
-  - `claimed_at` pada queued messages hanya menunjukkan klaim antrean, bukan bukti proses OS hidup.
 - **Kueri:**
   ```python
   stmt_inflight = select(v_api_active_in_flight_tasks).order_by(v_api_active_in_flight_tasks.c.created_at.asc()).limit(limit)
@@ -563,16 +684,17 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 
 class InFlightAnalysisDTO(BaseModel):
-    analysis_log_id: int = Field(description="ID catatan analisis")
+    task_id: int = Field(description="Surrogate identifier untuk task aktif (React list key)")
     status: Literal["PROCESSING"] = Field(default="PROCESSING")
-    created_at: datetime = Field(description="Waktu task mulai dibuat (UTC)")
-    elapsed_seconds: float = Field(description="Usia record sejak created_at dalam detik")
-    has_checkpoint: bool = Field(description="Apakah checkpoint parsial tersedia")
+    created_at: datetime = Field(description="Waktu task mulai dicatat di database (UTC)")
+    elapsed_seconds: float = Field(description="Usia keberadaan record dalam detik (bukan heartbeat liveness)")
 
 class QueuedMessageDTO(BaseModel):
-    pending_id: int = Field(description="ID antrean pesan pending")
+    queue_item_id: int = Field(description="Surrogate identifier untuk item antrean (React list key)")
     status: Literal["PENDING", "CLAIMED"] = Field(description="Status antrean")
-    queue_reason: str | None = Field(default=None, description="Kode alasan antrean allowlisted (mis: BLOCKED_HARD_BUDGET)")
+    queue_reason: Literal["BLOCKED_HARD_BUDGET", "MANUAL_REVIEW_BUDGET", "OTHER"] = Field(
+        description="Kode alasan antrean allowlisted"
+    )
     attempts: int = Field(default=0, description="Jumlah percobaan pemrosesan")
     claimed_at: datetime | None = Field(default=None, description="Waktu terakhir klaim antrean")
     created_at: datetime = Field(description="Waktu masuk antrean")
@@ -607,7 +729,7 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 
 class MarketWatchItemDTO(BaseModel):
-    watch_id: int = Field(description="ID pengawasan spread")
+    watch_id: int = Field(description="Surrogate identifier pengawasan spread (React list key)")
     symbol: str = Field(description="Simbol instrumen (mis: XAUUSD)")
     status: Literal["WAITING_FOR_SPREAD", "RECHECKING"] = Field(description="Status pengawasan aktif")
     spread_pips: Decimal | None = Field(default=None, description="Spread pips terakhir yang teramati")
@@ -629,9 +751,10 @@ class ActiveMarketWatchesResponse(BaseModel):
 
 ### 5.5 Endpoint 5: `GET /api/v1/audit/decisions`
 - **View Sumber:** `v_api_audit_decisions`.
-- **Sanitasi Privasi:**
-  - `reviewer_role` sudah diproyeksikan sebagai `'Authorized Approver'` di level view.
-  - `note` **dikecualikan dari view dan DTO** untuk mencegah kebocoran pesan internal.
+- **Sanitasi Kritis:**
+  - `analysis_log_id` **DIHAPUS DARI VIEW DAN DTO**.
+  - `reviewer` asli dan `note` internal **DIHAPUS DARI VIEW DAN DTO**.
+  - `reviewer_role` diproyeksikan langsung sebagai `"Authorized Approver"` di level view.
 - **Kueri:**
   ```python
   stmt = (
@@ -649,8 +772,7 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 
 class AuditDecisionItemDTO(BaseModel):
-    audit_id: int = Field(description="ID rekaman audit keputusan")
-    analysis_log_id: int = Field(description="ID analisis terkait")
+    audit_id: int = Field(description="Surrogate identifier rekaman audit (React list key)")
     decision: Literal["APPROVED", "REJECTED"] = Field(description="Keputusan yang diambil")
     previous_status: str = Field(description="Status sebelum keputusan (mis: MANUAL_REVIEW)")
     new_status: str = Field(description="Status setelah keputusan (mis: APPROVED / REJECTED)")
@@ -677,7 +799,7 @@ def verify_api_token(provided_token: str | None, expected_token: str) -> bool:
     return secrets.compare_digest(provided_token.strip(), expected_token.strip())
 ```
 
-### Temuan Kritis:
+### Temuan Kritis & Instruksi Perbaikan:
 1. **Normalisasi Token Server:** `expected_token` yang dimuat dari variabel environment `.env` boleh dinormalisasi via `.strip()` saat inisialisasi di `api_settings.get_api_auth_token()` untuk mencegah trailing newline atau whitespace file.
 2. **Kerapuhan `provided_token.strip()`:**
    - Melakukan `.strip()` pada `provided_token` mengubah nilai kredensial yang dikirim oleh pengguna. Jika pengguna mengirim token dengan spasi tambahan (`"Bearer secret "`), token tersebut seharusnya dianggap **TIDAK COCOK** dan ditolak.
@@ -701,17 +823,15 @@ def verify_api_token(provided_token: str | None, expected_token: str) -> bool:
 
 ---
 
-## 7. Freshness & Liveness Semantics
+## 7. Freshness & Liveness Semantics Sesuai Architecture Freeze
 
-API Gateway dan Virtual Office menerapkan **6 Status Visual Resmi** yang terikat pada bukti nyata data, bukan spekulasi:
+Dokumen ini menyelaraskan kembali interpretasi status aktivitas dengan **Phase 3.0 Architecture Freeze** dan memperbaiki kesalahan inferensi:
 
 ```text
 +-------------------+---------------------------------------+----------------------------------+
 | STATUS SISTEM     | STATUS VISUAL 3D                      | ARTI & PRESENTASI                |
 +-------------------+---------------------------------------+----------------------------------+
-| In-flight Update  | BUSY (Inferred, Unconfirmed Heartbeat)| Task aktif < 120s, avatar kerja  |
-| In-flight Lambat  | LINGERING (Latency Warning)           | Task aktif 121–180s, amber kedip |
-| In-flight Mandek  | STALE (In-flight Timeout Alert)       | Task aktif > 180s, badge macet   |
+| In-flight Record  | BUSY (Unconfirmed Liveness Inference) | Record PROCESSING terdeteksi     |
 | Tidak ada task    | QUIET (Business Idle - BUKAN STALE)   | Normal tenang, avatar standby    |
 | Transport Putus   | DISCONNECTED                          | Transport HTTP/SSE terputus      |
 | Database Down     | DB_UNAVAILABLE                        | Gagal kontak ke Supabase         |
@@ -720,9 +840,14 @@ API Gateway dan Virtual Office menerapkan **6 Status Visual Resmi** yang terikat
 ```
 
 ### Aturan Diagnostik Mutlak:
-1. **Ketiadaan Task Bukan Stale:** Jika tidak ada record `PROCESSING` dan tidak ada aktivitas selama 1 jam, sistem berstatus **`QUIET`**. Ketiadaan task adalah kondisi bisnis normal saat pasar tenang.
-2. **Keterbatasan `AIAnalysisLog`:** Karena `ai_analysis_logs` tidak memiliki kolom `updated_at`, `elapsed_seconds` dihitung dari `created_at`. Jika ada task `PROCESSING` yang sudah berumur $> 180$ detik, task tersebut berstatus **`STALE`** (indikasi proses worker mengalami crash atau unhandled exception di masa lalu).
-3. **Ketiadaan Worker Heartbeat:** Status `BUSY` selalu dinyatakan sebagai *inferred* (berdasarkan adanya record data aktif), bukan jaminan proses worker OS hidup. Dilarang mengarang heartbeat proses.
+1. **Larangan Menyimpulkan Worker Crash:**
+   Karena backend saat ini **BELUM MEMILIKI HEARTBEAT PERIODIK ATAU `updated_at` PADA `AIAnalysisLog`**, API Gateway dan Virtual Office **DILARANG KERAS** menyimpulkan bahwa background worker telah crash hanya karena usia record `created_at` sudah tua.
+2. **Hapus Status STALE Berdasarkan `created_at`:**
+   Nilai `created_at` hanya menunjukkan kapan pesan mulai dicatat, bukan bukti kapan worker terakhir beroperasi. Oleh karena itu, klasifikasi `STALE` berdasarkan batas usia `created_at > 180s` **DIHAPUS**.
+3. **Semantik In-Flight Murni:**
+   Task dengan status `PROCESSING` hanya dinyatakan sebagai **in-flight record dengan liveness tidak terkonfirmasi** (*unconfirmed in-flight record*). Proyeksi 3D menampilkan avatar dalam pose inferensi tanpa klaim kepastian proses OS aktif.
+4. **Ketiadaan Task Bukan Stale:**
+   Jika tidak ada task aktif selama berjam-jam, sistem berstatus **`QUIET`**. Ketiadaan task adalah kondisi bisnis normal saat pasar tenang.
 
 ---
 
@@ -730,11 +855,11 @@ API Gateway dan Virtual Office menerapkan **6 Status Visual Resmi** yang terikat
 
 | Endpoint API | View Database Sumber | Tabel Dasar | Kolom Terpapar di View & API | Kolom Terlarang / Disanitasi dari View |
 |---|---|---|---|---|
-| `GET /api/v1/system/status` | `v_api_system_runtime_state` | `runtime_control_state` | `id`, `execution_mode`, `trading_mode`, `auto_execution_enabled`, `auto_paused`, `updated_at` | `updated_by` (ID Telegram operator) |
+| `GET /api/v1/system/status` | `v_api_system_runtime_state` | `runtime_control_state` | `execution_mode`, `trading_mode`, `auto_execution_enabled`, `auto_paused`, `updated_at` | `id` (internal singleton PK), `updated_by` (ID Telegram operator) |
 | `GET /api/v1/telemetry/usage` | `v_api_telemetry_usage` | `ai_usage_logs` | `usage_date`, `provider`, `model`, `tier`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `thinking_tokens`, `billing_currency`, `cost_rp`, `reserved_rp`, `cost_usd`, `reserved_usd`, `status`, `created_at`, `completed_at` | `id`, `request_id`, `analysis_log_id`, `error_message`, `cache_write_5m_tokens`, `cache_write_1h_tokens`, `cache_ttl_estimated` |
-| `GET /api/v1/pipeline/active` | `v_api_active_in_flight_tasks` & `v_api_queued_pending_messages` | `ai_analysis_logs` & `ai_pending_messages` | **In-flight:** `analysis_log_id`, `status`, `created_at`, `elapsed_seconds`, `has_checkpoint`.<br>**Queued:** `pending_id`, `status`, `queue_reason`, `attempts`, `claimed_at`, `created_at`, `updated_at` | `chat_id`, `target_message_id`, `result_json`, `error_message`, `dedup_key`, `telegram_message_id`, `claimed_by`, `last_error`, `next_attempt_at` |
+| `GET /api/v1/pipeline/active` | `v_api_active_in_flight_tasks` & `v_api_queued_pending_messages` | `ai_analysis_logs` & `ai_pending_messages` | **In-flight:** `task_id`, `status`, `created_at`, `elapsed_seconds`.<br>**Queued:** `queue_item_id`, `status`, `queue_reason` (allowlisted: BLOCKED_HARD_BUDGET, MANUAL_REVIEW_BUDGET, OTHER), `attempts`, `claimed_at`, `created_at`, `updated_at` | `chat_id`, `target_message_id`, `result_json`, `error_message`, `has_checkpoint` (fiktif), `dedup_key`, `telegram_message_id`, `analysis_log_id`, `claimed_by`, `last_error`, `next_attempt_at` |
 | `GET /api/v1/market-watches/active` | `v_api_active_market_watches` | `trade_decision_watches` | `watch_id`, `symbol`, `status`, `spread_pips`, `maximum_spread_pips`, `last_bid`, `last_ask`, `check_count`, `last_checked_at`, `next_check_at`, `created_at`, `updated_at` | `analysis_log_id`, `trade_episode_id`, `broker_server`, `last_reason`, `resolved_at` |
-| `GET /api/v1/audit/decisions` | `v_api_audit_decisions` | `approval_decisions` | `audit_id`, `analysis_log_id`, `decision`, `previous_status`, `new_status`, `reviewer_role`, `decided_at` | `reviewer` (Telegram Username/ID), `note` (Catatan internal disensor penuh dari View) |
+| `GET /api/v1/audit/decisions` | `v_api_audit_decisions` | `approval_decisions` | `audit_id`, `decision`, `previous_status`, `new_status`, `reviewer_role`, `decided_at` | `analysis_log_id` (internal FK), `reviewer` (Telegram Username/ID), `note` (Catatan internal disensor penuh dari View) |
 
 ---
 
@@ -746,12 +871,12 @@ Implementasi Batch 2 dinyatakan lulus kriteria keamanan jika memenuhi 10 kriteri
 2. **Bearer Token Mandatory:** Seluruh request tanpa header `Authorization: Bearer <token>` atau dengan token salah ditolak `HTTP 401 Unauthorized`.
 3. **Exact Token Comparison:** `verify_api_token()` menggunakan perbandingan waktu-konstan persis (`secrets.compare_digest(provided_token, expected_token)`) tanpa `.strip()` pada `provided_token`.
 4. **Zero Base Table SELECT:** Seluruh kueri dieksekusi HANYA pada 6 View (`v_api_*`). API Gateway tidak memiliki kueri yang membaca tabel dasar.
-5. **Separation of Currencies:** IDR dan USD dilaporkan terpisah tanpa penjumlahan lintas mata uang.
-6. **Asia/Jakarta Timezone Evaluation:** Evaluasi tanggal pemakaian token AI menggunakan zona waktu `Asia/Jakarta`.
-7. **Zero Secrets in Public Artifacts:** Tidak ada secret token yang tercatat dalam log aplikasi atau diteruskan ke return value dependency.
+5. **Zero Foreign Keys Exposed:** `analysis_log_id`, `trade_episode_id`, dan foreign key internal lainnya tidak diekspos di View audit maupun endpoint publik.
+6. **Separation of Currencies:** IDR dan USD dilaporkan terpisah tanpa penjumlahan lintas mata uang.
+7. **Asia/Jakarta Timezone Evaluation:** Evaluasi tanggal pemakaian token AI menggunakan zona waktu `Asia/Jakarta`.
 8. **Isolated Connection Pool:** API Gateway hanya menggunakan pool read-only (`pool_size=2, max_overflow=0`) dengan role `sireader_api_ro`.
 9. **Fail-Closed Configuration:** Jika `SIREADER_API_DATABASE_URL` atau `SIREADER_API_AUTH_TOKEN` kosong/tidak ada, aplikasi menolak beroperasi secara fail-closed.
-10. **Zero Fabrications:** Tidak ada konfigurasi atau heartbeat worker fiktif yang dikarang dalam status respons.
+10. **Zero Fabrications:** Tidak ada konfigurasi sintetis, checkpoint fiktif, atau heartbeat worker yang dikarang dalam status respons.
 
 ---
 
@@ -769,25 +894,28 @@ Argon wajib mengimplementasikan pengujian komprehensif di `tests/api/test_endpoi
 |                                    | 4. Request dengan token ber-spasi tambahan -> 401              |
 |                                    | 5. Request dengan token exact match -> 200                    |
 +------------------------------------+---------------------------------------------------------------+
-| System Status                      | 1. Sukses dengan data runtime_control_state valid -> 200      |
-|                                    | 2. Tabel runtime_control_state kosong -> 200, control = None  |
+| System Status                      | 1. Sukses dengan data v_api_system_runtime_state valid -> 200  |
+|                                    | 2. View kosong -> 200, runtime_control = None                 |
 |                                    | 3. Database connection failure -> 503 Service Unavailable    |
 +------------------------------------+---------------------------------------------------------------+
 | Telemetry Usage                    | 1. Pemisahan IDR dan USD tanpa percampuran nilai              |
 |                                    | 2. Handling COALESCE untuk data lama dengan currency NULL     |
-|                                    | 3. Zero data telemetry -> 200, list kosong / total 0          |
-|                                    | 4. Filter tanggal Asia/Jakarta                                |
+|                                    | 3. Verifikasi status_counts teragregasi benar                 |
+|                                    | 4. Verifikasi rincian per model dan tier teragregasi benar    |
+|                                    | 5. Zero data telemetry -> 200, list kosong / total 0          |
+|                                    | 6. Filter tanggal Asia/Jakarta                                |
 +------------------------------------+---------------------------------------------------------------+
 | Active Pipeline                    | 1. Membaca task PROCESSING dengan elapsed_seconds > 0         |
-|                                    | 2. Membaca queued messages BLOCKED_HARD_BUDGET                |
-|                                    | 3. Verifikasi ketiadaan result_json dan error mentah          |
+|                                    | 2. Membaca queued messages dengan queue_reason allowlisted     |
+|                                    | 3. Queue reason asing menjadi 'OTHER'                         |
+|                                    | 4. Verifikasi tidak ada field has_checkpoint, chat_id, error  |
 +------------------------------------+---------------------------------------------------------------+
 | Market Watches                     | 1. Filter status WAITING_FOR_SPREAD dan RECHECKING            |
 |                                    | 2. Status RESOLVED tidak muncul                               |
-|                                    | 3. Verifikasi broker_server dan last_reason tidak ada di JSON  |
+|                                    | 3. Verifikasi broker_server, last_reason, FK tidak ada di JSON|
 +------------------------------------+---------------------------------------------------------------+
 | Audit Decisions                    | 1. Verifikasi reviewer_role adalah 'Authorized Approver'      |
-|                                    | 2. Verifikasi kolom note internal tidak bocor ke JSON         |
+|                                    | 2. Verifikasi analysis_log_id dan note TIDAK ADA di JSON      |
 |                                    | 3. Verifikasi pagination limit & offset                       |
 +------------------------------------+---------------------------------------------------------------+
 ```
@@ -836,4 +964,4 @@ Argon wajib mengimplementasikan pengujian komprehensif di `tests/api/test_endpoi
 ```
 
 ---
-*Dokumen revisi arsitektur dan kontrak ini siap diserahkan kepada Argon untuk implementasi Batch 2.*
+*Dokumen revisi final ini telah diperiksa silang terhadap source code riil dan siap diserahkan kepada Argon.*
