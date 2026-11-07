@@ -61,6 +61,38 @@ view_names(view_name) AS (
         ('v_api_active_market_watches'),
         ('v_api_audit_decisions')
 ),
+protected_objects(object_name) AS (
+    SELECT table_name FROM base_tables
+    UNION ALL
+    SELECT view_name FROM view_names
+),
+public_table_grants AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(c.relacl, acldefault('r', c.relowner))
+        ) acl
+        WHERE n.nspname = 'public'
+          AND c.relname IN (SELECT object_name FROM protected_objects)
+          AND acl.grantee = 0
+    ) AS has_any
+),
+public_column_grants AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid
+        CROSS JOIN LATERAL aclexplode(COALESCE(a.attacl, '{}'::aclitem[])) acl
+        WHERE n.nspname = 'public'
+          AND c.relname IN (SELECT object_name FROM protected_objects)
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND acl.grantee = 0
+    ) AS has_any
+),
 view_owner_columns(table_name, column_name) AS (
     VALUES
         ('runtime_control_state', 'execution_mode'),
@@ -271,6 +303,8 @@ SELECT
     (SELECT has_any FROM api_base_table_access) AS api_base_table_access,
     (SELECT has_any FROM api_base_table_maintain_access) AS api_base_table_maintain,
     (SELECT has_any FROM api_base_column_access) AS api_base_column_access,
+    (SELECT has_any FROM public_table_grants) AS public_table_grants,
+    (SELECT has_any FROM public_column_grants) AS public_column_grants,
     has_schema_privilege('sireader_view_owner', 'public', 'CREATE') AS owner_schema_create,
     (SELECT has_any FROM owner_base_table_access) AS owner_base_table_access,
     (SELECT has_any FROM owner_base_table_maintain_access) AS owner_base_table_maintain,
@@ -330,6 +364,10 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
         raise RuntimeError("sireader_api_ro must not have MAINTAIN on protected base tables.")
     if snapshot.get("api_base_column_access") is not False:
         raise RuntimeError("sireader_api_ro has an effective privilege on a protected base-table column.")
+    if snapshot.get("public_table_grants") is not False:
+        raise RuntimeError("PUBLIC has table-level privileges on a protected base table or API view.")
+    if snapshot.get("public_column_grants") is not False:
+        raise RuntimeError("PUBLIC has column-level privileges on a protected base table or API view.")
     if snapshot.get("owner_schema_create") is not False:
         raise RuntimeError("sireader_view_owner must not retain CREATE on schema public.")
     if snapshot.get("owner_base_table_access") is not False:
