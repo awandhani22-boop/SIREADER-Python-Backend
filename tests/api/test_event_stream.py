@@ -22,13 +22,15 @@ def run(coro):
 
 
 def test_listener_readiness_requires_all_six_safe_trigger_pairs():
-    validate_trigger_inventory(6, 6, 0)
+    validate_trigger_inventory(6, 6, 0, 0)
     with pytest.raises(RuntimeError):
-        validate_trigger_inventory(0, 0, 0)
+        validate_trigger_inventory(0, 0, 0, 0)
     with pytest.raises(RuntimeError):
-        validate_trigger_inventory(6, 5, 0)
+        validate_trigger_inventory(6, 5, 0, 0)
     with pytest.raises(RuntimeError):
-        validate_trigger_inventory(6, 6, 1)
+        validate_trigger_inventory(6, 6, 1, 0)
+    with pytest.raises(RuntimeError):
+        validate_trigger_inventory(6, 6, 0, 1)
 
 
 def test_event_envelope_contains_only_allowlisted_resource_metadata():

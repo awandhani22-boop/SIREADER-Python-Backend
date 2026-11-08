@@ -48,12 +48,14 @@ def validate_trigger_inventory(
     row_trigger_tables: int,
     truncate_trigger_tables: int,
     security_definer_functions: int,
+    unsafe_search_path_functions: int,
 ) -> None:
     """Fail closed unless every expected table has safe row and TRUNCATE triggers."""
     if (
         row_trigger_tables != 6
         or truncate_trigger_tables != 6
         or security_definer_functions != 0
+        or unsafe_search_path_functions != 0
     ):
         raise RuntimeError("SSE notification migration is missing or unsafe.")
 
@@ -344,7 +346,11 @@ class PostgresNotifyListener:
                 count(DISTINCT c.relname) FILTER (
                     WHERE t.tgname = 'sireader_observability_truncate'
                 )::int AS truncate_trigger_tables,
-                count(*) FILTER (WHERE p.prosecdef)::int AS security_definer_functions
+                count(*) FILTER (WHERE p.prosecdef)::int AS security_definer_functions,
+                count(*) FILTER (
+                    WHERE p.proconfig IS NULL
+                       OR NOT (p.proconfig @> ARRAY['search_path=pg_catalog']::text[])
+                )::int AS unsafe_search_path_functions
             FROM pg_catalog.pg_trigger AS t
             JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid
             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
@@ -367,9 +373,9 @@ class PostgresNotifyListener:
         )
         row = await cursor.fetchone()
         if row is None:
-            validate_trigger_inventory(0, 0, 1)
+            validate_trigger_inventory(0, 0, 1, 1)
             return
-        validate_trigger_inventory(int(row[0]), int(row[1]), int(row[2]))
+        validate_trigger_inventory(int(row[0]), int(row[1]), int(row[2]), int(row[3]))
 
     async def _run(self) -> None:
         from psycopg import AsyncConnection

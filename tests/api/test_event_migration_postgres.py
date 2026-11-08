@@ -54,7 +54,11 @@ def test_observability_migration_is_idempotent_and_transactional():
                     count(DISTINCT c.relname) FILTER (
                         WHERE t.tgname = 'sireader_observability_truncate'
                     )::int,
-                    count(*) FILTER (WHERE p.prosecdef)::int
+                    count(*) FILTER (WHERE p.prosecdef)::int,
+                    count(*) FILTER (
+                        WHERE p.proconfig IS NULL
+                           OR NOT (p.proconfig @> ARRAY['search_path=pg_catalog']::text[])
+                    )::int
                 FROM pg_catalog.pg_trigger AS t
                 JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid
                 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
@@ -70,7 +74,7 @@ def test_observability_migration_is_idempotent_and_transactional():
                   )
                 """
             ).fetchone()
-            assert inventory == (6, 6, 0)
+            assert inventory == (6, 6, 0, 0)
 
             with psycopg.connect(PSYCOPG_URL, autocommit=True) as listener:
                 listener.execute("SET default_transaction_read_only = on")
