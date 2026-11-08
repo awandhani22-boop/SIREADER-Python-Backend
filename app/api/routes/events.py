@@ -40,6 +40,7 @@ async def stream_observability_events(
 
     async def event_body() -> AsyncIterator[str]:
         try:
+            yield "retry: 3000\\n\\n"
             for event in subscription.initial_events:
                 yield event.to_sse()
             if subscription.closed_after_initial:
