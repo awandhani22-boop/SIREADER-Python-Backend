@@ -174,3 +174,23 @@ def test_sse_endpoint_streams_event_and_heartbeat_headers(monkeypatch):
             assert "retry: 3000" in retry_hint
             assert "event: resources.invalidated" in event_frame
             assert '"resources":["pipeline"]' in event_frame
+
+
+def test_event_hub_shutdown_signals_subscriber_and_releases_capacity():
+    async def run():
+        hub = _ready_hub(max_subscribers=1)
+        subscription = hub.subscribe(None)
+        assert hub.subscriber_count == 1
+        await hub.close()
+        assert subscription.closed is True
+        assert hub.subscriber_count == 0
+        assert await hub.next_event(subscription, timeout_seconds=0.1) is None
+
+        # Shutdown does not leave the in-memory capacity permanently occupied.
+        replacement = _ready_hub(max_subscribers=1)
+        new_subscription = replacement.subscribe(None)
+        assert replacement.subscriber_count == 1
+        replacement.unsubscribe(new_subscription)
+        await replacement.close()
+
+    asyncio.run(run())
