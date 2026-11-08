@@ -404,6 +404,7 @@ class PostgresNotifyListener:
                 stage = "migration_check"
                 await self._verify_migration(connection)
                 self._hub.set_listener_ready(True)
+                logger.info("SSE_LISTENER_READY channel=%s", CHANNEL)
                 delay = 1.0
                 stage = "notification_wait"
                 async for notification in connection.notifies():
