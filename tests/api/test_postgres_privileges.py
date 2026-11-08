@@ -4,6 +4,7 @@ This test runs only against an explicitly supplied disposable CI database.
 It never connects to Supabase or to the user's production database.
 """
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
+from app.api.events import ObservabilityEventHub
 from app.api.server import (
     PRIVILEGE_AUDIT_SQL,
     APPROVED_VIEW_NAMES,
@@ -560,3 +562,59 @@ def test_postgres_observability_notify_triggers_are_minimal_and_commit_scoped(po
     finally:
         with postgres_security_engine.begin() as connection:
             connection.exec_driver_sql(rollback_sql)
+
+
+def test_postgres_async_listener_receives_committed_resource_invalidation(postgres_security_engine):
+    """Exercise the real Psycopg listener against the disposable PostgreSQL CI service."""
+    migration_path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "2026_11_09_phase_3_3_observability_notify.sql"
+    )
+    rollback_path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "rollback"
+        / "2026_11_09_phase_3_3_observability_notify_rollback.sql"
+    )
+    with postgres_security_engine.begin() as connection:
+        connection.exec_driver_sql(migration_path.read_text(encoding="utf-8"))
+
+    dsn = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://", 1)
+
+    async def exercise_listener():
+        hub = ObservabilityEventHub()
+        hub.start(dsn)
+        try:
+            for _ in range(100):
+                if hub.is_ready:
+                    break
+                await asyncio.sleep(0.05)
+            assert hub.is_ready, "Psycopg LISTEN connection did not become ready"
+
+            subscription = hub.subscribe(None)
+            with postgres_security_engine.begin() as writer:
+                writer.exec_driver_sql(
+                    """
+                    INSERT INTO public.runtime_control_state
+                    (id, execution_mode, trading_mode, auto_execution_enabled, auto_paused, updated_at)
+                    VALUES (4, 'APPROVAL', 'DRY_RUN', false, true, now())
+                    """
+                )
+
+            event = await hub.next_event(subscription, timeout_seconds=2.0)
+            assert event is not None
+            assert event.name == "resources.invalidated"
+            assert event.data["resources"] == ["system"]
+            assert set(event.data) == {"schema_version", "occurred_at", "resources"}
+            await hub.close()
+            assert subscription.closed is True
+            assert hub.subscriber_count == 0
+        finally:
+            await hub.close()
+
+    try:
+        asyncio.run(exercise_listener())
+    finally:
+        with postgres_security_engine.begin() as connection:
+            connection.exec_driver_sql(rollback_path.read_text(encoding="utf-8"))
