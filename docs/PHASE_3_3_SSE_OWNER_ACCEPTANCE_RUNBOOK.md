@@ -73,7 +73,7 @@ WHERE n.nspname = 'public'
 ORDER BY c.relname;
 ```
 
-Expected: six non-internal triggers on runtime_control_state, ai_usage_logs, ai_analysis_logs, ai_pending_messages, trade_decision_watches, approval_decisions. Verify that the approval_decisions trigger is INSERT-only. The runtime role must retain no base-table write, TRIGGER, or migration privileges.
+Expected: twelve non-internal triggers: one row-level trigger and one statement-level TRUNCATE trigger on each of runtime_control_state, ai_usage_logs, ai_analysis_logs, ai_pending_messages, trade_decision_watches and approval_decisions. The approval_decisions row-level trigger is INSERT-only; its separate TRUNCATE trigger only invalidates the snapshot after a table-wide truncate. The runtime role must retain no base-table write, TRIGGER, or migration privileges.
 
 Check the function security properties:
 
