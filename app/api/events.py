@@ -62,6 +62,7 @@ class EventSubscription:
     initial_events: tuple[StreamEvent, ...] = ()
     closed_after_initial: bool = False
     closed_after_queue: bool = False
+    closed: bool = False
 
 
 def parse_event_cursor(value: str | None) -> tuple[str, int] | None:
@@ -275,6 +276,7 @@ class ObservabilityEventHub:
                     subscription.queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+            subscription.closed = True
             subscription.queue.put_nowait(None)
             self._subscribers.discard(subscription)
 
