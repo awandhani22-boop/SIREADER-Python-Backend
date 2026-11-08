@@ -66,6 +66,7 @@ def test_replay_after_valid_cursor_is_ordered():
         first = hub.publish_resources(["system"])
         hub.publish_resources(["telemetry"])
         hub.publish_resources(["audit"])
+        hub.publish_resources(["market_watches"])
         subscriber = hub.subscribe(first.event_id)
         one = await subscriber.next_message(0.01)
         two = await subscriber.next_message(0.01)
@@ -163,13 +164,14 @@ def test_notification_debounce_coalesces_resource_keys():
     async def scenario():
         hub = EventHub(debounce_seconds=0.01)
         hub.set_listener_ready(True)
+        subscriber = hub.subscribe()
         hub.note_resource("system")
         hub.note_resource("pipeline")
         hub.note_resource("system")
         await asyncio.sleep(0.03)
-        assert hub.latest_event_id is not None
-        subscriber = hub.subscribe(hub.latest_event_id)
-        assert await subscriber.next_message(0.001) is None
+        message = await subscriber.next_message(0.01)
+        assert message is not None
+        assert message.data["resources"] == ["system", "pipeline"]
         hub.unsubscribe(subscriber)
 
     run(scenario())
