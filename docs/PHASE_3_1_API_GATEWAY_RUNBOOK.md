@@ -1,6 +1,6 @@
 # SIREADER Phase 3.1 — API Gateway Runbook
 
-Status: **SUPABASE DATABASE PREREQUISITES APPLIED AND EMPIRICALLY VERIFIED (2026-11-08); LOCAL API CREDENTIAL SETUP AND HTTP SMOKE TEST REMAIN.**
+Status: **SUPABASE DATABASE PREREQUISITES APPLIED AND EMPIRICALLY VERIFIED (2026-11-08); FIVE-ENDPOINT LOCAL API ACCEPTANCE OWNER-REPORTED COMPLETE (2026-11-08).**
 
 This runbook records the live Supabase read-only database setup and explains the remaining local-only credential/configuration steps. The database migration has already been applied to the connected project; do not re-run provisioning SQL manually.
 
@@ -31,7 +31,21 @@ The disposable PostgreSQL 16 GitHub Actions integration test is useful automated
 - Default table and sequence privileges for objects created by `postgres` in `public` were tightened so future objects are not automatically granted to `anon` or `authenticated`.
 - Post-change Security Advisor has no `rls_disabled_in_public` finding. Nine `rls_enabled_no_policy` INFO findings are intentional deny-by-default tables. The missing `signal_setups.source_message_id` foreign-key index was added; the unindexed-FK warning is gone. Sixteen unused-index INFO findings remain and were not removed.
 
-**Credential note:** `sireader_api_ro` has LOGIN enabled but no password has been set by the assistant. Set its password privately with the `psql \password sireader_api_ro` command below before placing the URL in the local `.env`. The Supabase-managed `supabase_admin` default ACL remains platform-managed; this migration path and the SIREADER schema owner use `postgres`.
+**Credential note:** The assistant has not set, received, or stored the database password or API bearer token. The owner reported that local credentials were configured privately and that the API connected using `sireader_api_ro`. Credentials remain machine-local; do not infer that another environment is configured. The Supabase-managed `supabase_admin` default ACL remains platform-managed; this migration path and the SIREADER schema owner use `postgres`.
+
+### 1.2 Owner-reported local API acceptance (2026-11-08)
+
+The owner reported the following local checks completed against the configured Supabase project and the standalone API process at `127.0.0.1:8000`:
+
+- The live API database session identified `current_user = sireader_api_ro` and `transaction_read_only = on`.
+- The six approved observability views were queryable by the API role.
+- Direct base-table access was denied; the API remained limited to its approved read-only view boundary.
+- All five authenticated GET observability endpoints returned HTTP 200.
+- A request without the API Bearer token returned HTTP 401.
+- The server-to-server token and database connection string remained private and were not included in the report.
+
+These are owner-reported local results, not a fresh execution by GitHub Actions or by this documentation update. No password, token, connection string, or database value is recorded here. Repeat the smoke checks during formal deployment/release verification.
+
 
 ## 2. Set the dedicated database password
 
@@ -57,7 +71,7 @@ Use the existing local backend root, for example C:\SIREADER. The API reads its 
 Add the following values to the local .env only after the DBA has issued a dedicated sireader_api_ro database credential:
 
 ```dotenv
-SIREADER_API_DATABASE_URL=postgresql+psycopg://sireader_api_ro:<URL_ENCODED_PASSWORD>@db.otinrvvfjnyxjvzcmdia.supabase.co:5432/postgres?sslmode=require
+SIREADER_API_DATABASE_URL=postgresql+psycopg://sireader_api_ro.<PROJECT_REF>:<URL_ENCODED_PASSWORD>@<REGION>.pooler.supabase.com:5432/postgres?sslmode=require
 SIREADER_API_AUTH_TOKEN=<LONG_RANDOM_SERVER_ONLY_TOKEN>
 API_HOST=127.0.0.1
 API_PORT=8000
@@ -66,6 +80,8 @@ API_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 
 Important:
 - Replace every placeholder. URL-encode reserved characters in the database password.
+- The owner environment previously required the Supabase Session Pooler because the direct database host did not provide a usable IPv4 route from the local machine. Use the Session Pooler endpoint for that environment and keep `sslmode=require`.
+- Phase 3.3's PostgreSQL `LISTEN` design requires a session-preserving pooler mode; do not use transaction pooling for the long-lived listener. Verify actual pooler behavior before enabling SSE.
 - Do not use the main DATABASE_URL, Supabase service_role, postgres, or any role with table ownership/superuser privileges as the API login.
 - Do not commit .env, database passwords, bearer tokens, or connection strings.
 - Generate a strong bearer token locally with:
