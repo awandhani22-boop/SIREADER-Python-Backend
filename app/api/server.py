@@ -543,12 +543,32 @@ def run() -> None:
     if not 1 <= api_settings.API_PORT <= 65535:
         raise RuntimeError("API_PORT harus berada pada rentang 1..65535.")
 
-    # Psycopg's async socket notifications require a SelectorEventLoop on Windows.
-    # Uvicorn's single-worker Windows default is ProactorEventLoop, which is
-    # incompatible with psycopg AsyncConnection.notifies().
     if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        logger.info("Windows SelectorEventLoop enabled for PostgreSQL SSE listener.")
+        # Run Uvicorn on an explicitly-created SelectorEventLoop. Setting only
+        # the global policy is not sufficient when a runner selects its own loop.
+        loop = asyncio.SelectorEventLoop()
+        asyncio.set_event_loop(loop)
+        logger.warning(
+            "SSE_LOOP_SELECTED loop_type=%s",
+            type(loop).__name__,
+        )
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host=host,
+                port=api_settings.API_PORT,
+                workers=1,
+                loop="asyncio",
+            )
+        )
+        try:
+            loop.run_until_complete(server.serve())
+        finally:
+            if not loop.is_closed():
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+            asyncio.set_event_loop(None)
+        return
 
     uvicorn.run(app, host=host, port=api_settings.API_PORT, workers=1)
 
