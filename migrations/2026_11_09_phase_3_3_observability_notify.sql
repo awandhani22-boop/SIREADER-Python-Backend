@@ -86,11 +86,23 @@ CREATE TRIGGER sireader_observability_notify
 AFTER INSERT OR UPDATE OR DELETE ON public.runtime_control_state
 FOR EACH ROW EXECUTE FUNCTION public.sireader_notify_observability_change();
 
+DROP TRIGGER IF EXISTS sireader_observability_truncate
+    ON public.runtime_control_state;
+CREATE TRIGGER sireader_observability_truncate
+AFTER TRUNCATE ON public.runtime_control_state
+FOR EACH STATEMENT EXECUTE FUNCTION public.sireader_notify_observability_change();
+
 DROP TRIGGER IF EXISTS sireader_observability_notify
     ON public.ai_usage_logs;
 CREATE TRIGGER sireader_observability_notify
 AFTER INSERT OR UPDATE OR DELETE ON public.ai_usage_logs
 FOR EACH ROW EXECUTE FUNCTION public.sireader_notify_observability_change();
+
+DROP TRIGGER IF EXISTS sireader_observability_truncate
+    ON public.ai_usage_logs;
+CREATE TRIGGER sireader_observability_truncate
+AFTER TRUNCATE ON public.ai_usage_logs
+FOR EACH STATEMENT EXECUTE FUNCTION public.sireader_notify_observability_change();
 
 DROP TRIGGER IF EXISTS sireader_observability_notify
     ON public.ai_analysis_logs;
@@ -98,11 +110,23 @@ CREATE TRIGGER sireader_observability_notify
 AFTER INSERT OR UPDATE OR DELETE ON public.ai_analysis_logs
 FOR EACH ROW EXECUTE FUNCTION public.sireader_notify_observability_change();
 
+DROP TRIGGER IF EXISTS sireader_observability_truncate
+    ON public.ai_analysis_logs;
+CREATE TRIGGER sireader_observability_truncate
+AFTER TRUNCATE ON public.ai_analysis_logs
+FOR EACH STATEMENT EXECUTE FUNCTION public.sireader_notify_observability_change();
+
 DROP TRIGGER IF EXISTS sireader_observability_notify
     ON public.ai_pending_messages;
 CREATE TRIGGER sireader_observability_notify
 AFTER INSERT OR UPDATE OR DELETE ON public.ai_pending_messages
 FOR EACH ROW EXECUTE FUNCTION public.sireader_notify_observability_change();
+
+DROP TRIGGER IF EXISTS sireader_observability_truncate
+    ON public.ai_pending_messages;
+CREATE TRIGGER sireader_observability_truncate
+AFTER TRUNCATE ON public.ai_pending_messages
+FOR EACH STATEMENT EXECUTE FUNCTION public.sireader_notify_observability_change();
 
 DROP TRIGGER IF EXISTS sireader_observability_notify
     ON public.trade_decision_watches;
@@ -110,9 +134,21 @@ CREATE TRIGGER sireader_observability_notify
 AFTER INSERT OR UPDATE OR DELETE ON public.trade_decision_watches
 FOR EACH ROW EXECUTE FUNCTION public.sireader_notify_observability_change();
 
+DROP TRIGGER IF EXISTS sireader_observability_truncate
+    ON public.trade_decision_watches;
+CREATE TRIGGER sireader_observability_truncate
+AFTER TRUNCATE ON public.trade_decision_watches
+FOR EACH STATEMENT EXECUTE FUNCTION public.sireader_notify_observability_change();
+
 -- Approval audit records are append-only: only INSERT creates a new audit event.
 DROP TRIGGER IF EXISTS sireader_observability_notify
     ON public.approval_decisions;
 CREATE TRIGGER sireader_observability_notify
 AFTER INSERT ON public.approval_decisions
 FOR EACH ROW EXECUTE FUNCTION public.sireader_notify_observability_change();
+
+DROP TRIGGER IF EXISTS sireader_observability_truncate
+    ON public.approval_decisions;
+CREATE TRIGGER sireader_observability_truncate
+AFTER TRUNCATE ON public.approval_decisions
+FOR EACH STATEMENT EXECUTE FUNCTION public.sireader_notify_observability_change();
