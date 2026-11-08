@@ -68,7 +68,7 @@ FROM pg_trigger t
 JOIN pg_class c ON c.oid = t.tgrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public'
-  AND t.tgname = 'sireader_observability_notify'
+  AND t.tgname IN ('sireader_observability_notify', 'sireader_observability_truncate')
   AND NOT t.tgisinternal
 ORDER BY c.relname;
 ```
