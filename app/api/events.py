@@ -290,6 +290,10 @@ class ObservabilityEventHub:
                     autocommit=True,
                     connect_timeout=5,
                     application_name="sireader-observability-listener",
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=3,
                 )
                 async with connection.cursor() as cursor:
                     await cursor.execute(f"LISTEN {NOTIFY_CHANNEL}")
