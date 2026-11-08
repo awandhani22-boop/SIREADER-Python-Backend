@@ -118,6 +118,10 @@ def test_observability_migration_is_idempotent_and_transactional():
                 one = list(listener.notifies(timeout=2.0, stop_after=1))
                 assert [item.payload for item in one] == ["system"]
 
+                admin.execute("TRUNCATE public.approval_decisions")
+                truncated = list(listener.notifies(timeout=2.0, stop_after=1))
+                assert [item.payload for item in truncated] == ["audit"]
+
             admin.execute(rollback, prepare=False)
         finally:
             admin.execute(rollback, prepare=False)

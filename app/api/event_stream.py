@@ -333,6 +333,10 @@ class PostgresNotifyListener:
                     connect_timeout=5,
                     application_name="sireader-observability-listener",
                     options="-c default_transaction_read_only=on -c search_path=public",
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=3,
                 )
                 await connection.execute("LISTEN sireader_observability_v1")
                 self._hub.set_listener_ready(True)
