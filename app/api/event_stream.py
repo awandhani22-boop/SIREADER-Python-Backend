@@ -383,7 +383,11 @@ class PostgresNotifyListener:
         delay = 1.0
         while True:
             connection = None
+            stage = "event_loop"
+            loop_type = "unknown"
             try:
+                loop_type = type(asyncio.get_running_loop()).__name__
+                stage = "connect"
                 connection = await AsyncConnection.connect(
                     self._psycopg_dsn(),
                     autocommit=True,
@@ -395,16 +399,24 @@ class PostgresNotifyListener:
                     keepalives_interval=10,
                     keepalives_count=3,
                 )
+                stage = "listen"
                 await connection.execute("LISTEN sireader_observability_v1")
+                stage = "migration_check"
                 await self._verify_migration(connection)
                 self._hub.set_listener_ready(True)
                 delay = 1.0
+                stage = "notification_wait"
                 async for notification in connection.notifies():
                     self._hub.note_resource(notification.payload)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("SSE_LISTENER_RETRY error_type=%s", type(exc).__name__)
+                logger.warning(
+                    "SSE_LISTENER_RETRY stage=%s loop_type=%s error_type=%s",
+                    stage,
+                    loop_type,
+                    type(exc).__name__,
+                )
             finally:
                 self._hub.set_listener_ready(False)
                 if connection is not None:
