@@ -546,6 +546,13 @@ def test_postgres_observability_notify_triggers_are_minimal_and_commit_scoped(po
                 )
             assert list(listener.notifies(timeout=0.2, stop_after=1)) == []
 
+            # Audit rows are append-only: an UPDATE must not invalidate audit history.
+            with postgres_security_engine.begin() as writer:
+                writer.exec_driver_sql(
+                    "UPDATE public.approval_decisions SET note = 'edited' WHERE id = 1"
+                )
+            assert list(listener.notifies(timeout=0.2, stop_after=1)) == []
+
             # Notifications from a rolled-back transaction must not be delivered.
             writer = postgres_security_engine.connect()
             transaction = writer.begin()
