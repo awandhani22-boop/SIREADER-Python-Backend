@@ -117,6 +117,7 @@ def test_expired_cursor_sends_replay_gap_reset():
         first = hub.publish_resources(["system"])
         hub.publish_resources(["telemetry"])
         hub.publish_resources(["audit"])
+        hub.publish_resources(["market_watches"])
         subscriber = hub.subscribe(first.event_id)
         reset = await subscriber.next_message(0.01)
         assert reset is not None

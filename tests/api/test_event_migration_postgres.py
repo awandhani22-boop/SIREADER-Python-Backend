@@ -1,4 +1,8 @@
-"""Disposable PostgreSQL integration test for the Phase 3.3 trigger migration."""
+"""PostgreSQL integration test for the Phase 3.3 notification migration.
+
+Runs after test_postgres_privileges.py has provisioned its disposable CI schema.
+It never connects to Supabase or the user's production database.
+"""
 import os
 from pathlib import Path
 
@@ -30,8 +34,13 @@ def test_observability_migration_is_idempotent_and_transactional():
     expected = ["system", "telemetry", "pipeline", "pipeline", "market_watches", "audit"]
 
     with psycopg.connect(PSYCOPG_URL, autocommit=True) as admin:
-        for table in tables:
-            admin.execute(f'CREATE TABLE public."{table}" (id bigint PRIMARY KEY)')
+        missing = [
+            table for table in tables
+            if admin.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
+        ]
+        if missing:
+            pytest.skip("Run after the disposable PostgreSQL privilege fixture; missing base tables.")
+
         try:
             admin.execute(migration, prepare=False)
             admin.execute(migration, prepare=False)  # DROP + CREATE proves idempotency.
@@ -40,28 +49,75 @@ def test_observability_migration_is_idempotent_and_transactional():
                 listener.execute("SET default_transaction_read_only = on")
                 assert listener.execute("SHOW transaction_read_only").fetchone()[0] == "on"
                 listener.execute("LISTEN sireader_observability_v1")
+
+                writer_sql = [
+                    """
+                    INSERT INTO public.runtime_control_state
+                    (id, execution_mode, trading_mode, auto_execution_enabled, auto_paused, updated_at)
+                    VALUES (2, 'APPROVAL', 'DRY_RUN', false, true, now())
+                    """,
+                    """
+                    INSERT INTO public.ai_usage_logs
+                    (usage_date, provider, model, tier, input_tokens, output_tokens,
+                     cache_read_tokens, cache_write_tokens, thinking_tokens, billing_currency,
+                     cost_rp, reserved_rp, cost_usd, reserved_usd, status, created_at, completed_at)
+                    VALUES (current_date, 'ci', 'ci-model', 'FAST', 5, 7, 0, 0, 0, 'IDR',
+                            100, 20, 900, 900, 'COMPLETED', now(), now())
+                    """,
+                    """
+                    INSERT INTO public.ai_analysis_logs (chat_id, target_message_id, status, created_at)
+                    VALUES (123, 457, 'PROCESSING', now())
+                    """,
+                    """
+                    INSERT INTO public.ai_pending_messages
+                    (dedup_key, chat_id, telegram_message_id, status, reason, attempts, created_at, updated_at)
+                    VALUES ('ci-sse-dedup', 123, 457, 'PENDING', 'BLOCKED_HARD_BUDGET', 1, now(), now())
+                    """,
+                    """
+                    INSERT INTO public.trade_decision_watches
+                    (symbol, broker_server, status, spread_pips, maximum_spread_pips,
+                     check_count, next_check_at, last_reason, created_at, updated_at)
+                    VALUES ('XAUUSD', 'ci', 'WAITING_FOR_SPREAD', 5, 30,
+                            1, now(), 'ci', now(), now())
+                    """,
+                    """
+                    INSERT INTO public.approval_decisions
+                    (analysis_log_id, previous_status, decision, new_status, reviewer, note, created_at)
+                    VALUES (1, 'MANUAL_REVIEW', 'APPROVED', 'APPROVED', 'ci', 'ci', now())
+                    """,
+                ]
                 with psycopg.connect(PSYCOPG_URL) as writer:
-                    for table in tables:
-                        writer.execute(f'INSERT INTO public."{table}" (id) VALUES (1)')
+                    for statement in writer_sql:
+                        writer.execute(statement)
                         writer.commit()
 
                 notifications = list(listener.notifies(timeout=2.0, stop_after=6))
                 assert [item.payload for item in notifications] == expected
 
                 with psycopg.connect(PSYCOPG_URL) as writer:
-                    writer.execute('INSERT INTO public."runtime_control_state" (id) VALUES (2)')
+                    writer.execute(
+                        """
+                        INSERT INTO public.runtime_control_state
+                        (id, execution_mode, trading_mode, auto_execution_enabled, auto_paused, updated_at)
+                        VALUES (3, 'APPROVAL', 'DRY_RUN', false, true, now())
+                        """
+                    )
                     writer.rollback()
                 rolled_back = list(listener.notifies(timeout=0.2))
                 assert rolled_back == []
 
                 with psycopg.connect(PSYCOPG_URL) as writer:
-                    writer.execute('INSERT INTO public."runtime_control_state" (id) VALUES (3)')
+                    writer.execute(
+                        """
+                        INSERT INTO public.runtime_control_state
+                        (id, execution_mode, trading_mode, auto_execution_enabled, auto_paused, updated_at)
+                        VALUES (4, 'APPROVAL', 'DRY_RUN', false, true, now())
+                        """
+                    )
                     writer.commit()
                 one = list(listener.notifies(timeout=2.0, stop_after=1))
                 assert [item.payload for item in one] == ["system"]
 
             admin.execute(rollback, prepare=False)
         finally:
-            for table in tables:
-                admin.execute(f'DROP TABLE IF EXISTS public."{table}" CASCADE')
-            admin.execute("DROP FUNCTION IF EXISTS public.sireader_notify_observability_v1()")
+            admin.execute(rollback, prepare=False)
