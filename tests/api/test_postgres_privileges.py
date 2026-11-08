@@ -485,6 +485,56 @@ def test_postgres_observability_notify_triggers_are_minimal_and_commit_scoped(po
         connection.exec_driver_sql(migration_sql)
         connection.exec_driver_sql(migration_sql)
 
+    expected_tables = {
+        "runtime_control_state",
+        "ai_usage_logs",
+        "ai_analysis_logs",
+        "ai_pending_messages",
+        "trade_decision_watches",
+        "approval_decisions",
+    }
+    with postgres_security_engine.connect() as connection:
+        trigger_rows = connection.execute(text("""
+            SELECT c.relname AS table_name, t.tgname AS trigger_name,
+                   pg_get_triggerdef(t.oid) AS trigger_definition,
+                   p.prosecdef AS security_definer, p.proconfig AS function_config
+            FROM pg_trigger t
+            JOIN pg_class c ON c.oid = t.tgrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_proc p ON p.oid = t.tgfoid
+            WHERE n.nspname = 'public'
+              AND t.tgname IN (
+                'sireader_observability_notify',
+                'sireader_observability_truncate'
+              )
+              AND NOT t.tgisinternal
+        """)).mappings().all()
+    assert len(trigger_rows) == 12
+    assert {row["table_name"] for row in trigger_rows} == expected_tables
+    assert all(row["security_definer"] is False for row in trigger_rows)
+    assert all(
+        row["function_config"] is not None
+        and any("search_path=pg_catalog, public" in value
+                for value in row["function_config"])
+        for row in trigger_rows
+    )
+    row_triggers = {
+        row["table_name"]: row["trigger_definition"]
+        for row in trigger_rows
+        if row["trigger_name"] == "sireader_observability_notify"
+    }
+    truncate_triggers = {
+        row["table_name"]: row["trigger_definition"]
+        for row in trigger_rows
+        if row["trigger_name"] == "sireader_observability_truncate"
+    }
+    assert set(row_triggers) == expected_tables
+    assert set(truncate_triggers) == expected_tables
+    assert "AFTER INSERT" in row_triggers["approval_decisions"]
+    assert "UPDATE" not in row_triggers["approval_decisions"]
+    assert "DELETE" not in row_triggers["approval_decisions"]
+    assert all("AFTER TRUNCATE" in definition for definition in truncate_triggers.values())
+
     dsn = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://", 1)
     try:
         with psycopg.connect(dsn, autocommit=True) as listener:
@@ -575,6 +625,28 @@ def test_postgres_observability_notify_triggers_are_minimal_and_commit_scoped(po
     finally:
         with postgres_security_engine.begin() as connection:
             connection.exec_driver_sql(rollback_sql)
+        with postgres_security_engine.connect() as connection:
+            remaining_triggers = connection.execute(text("""
+                SELECT count(*)
+                FROM pg_trigger t
+                JOIN pg_class c ON c.oid = t.tgrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'public'
+                  AND t.tgname IN (
+                    'sireader_observability_notify',
+                    'sireader_observability_truncate'
+                  )
+                  AND NOT t.tgisinternal
+            """)).scalar_one()
+            remaining_function = connection.execute(text("""
+                SELECT count(*)
+                FROM pg_proc p
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND p.proname = 'sireader_notify_observability_change'
+            """)).scalar_one()
+        assert remaining_triggers == 0
+        assert remaining_function == 0
 
 
 def test_postgres_async_listener_receives_committed_resource_invalidation(postgres_security_engine):
