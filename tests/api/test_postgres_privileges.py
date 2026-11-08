@@ -5,7 +5,9 @@ It never connects to Supabase or to the user's production database.
 """
 
 import os
+from pathlib import Path
 
+import psycopg
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
@@ -458,3 +460,103 @@ def test_postgres_privilege_audit_detects_public_table_and_column_grants(postgre
             admin.exec_driver_sql(
                 "REVOKE SELECT (chat_id) ON public.ai_analysis_logs FROM PUBLIC"
             )
+
+
+def test_postgres_observability_notify_triggers_are_minimal_and_commit_scoped(postgres_security_engine):
+    """Exercise the real migration against the disposable PostgreSQL CI service only."""
+    migration_path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "2026_11_09_phase_3_3_observability_notify.sql"
+    )
+    rollback_path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "rollback"
+        / "2026_11_09_phase_3_3_observability_notify_rollback.sql"
+    )
+    migration_sql = migration_path.read_text(encoding="utf-8")
+    rollback_sql = rollback_path.read_text(encoding="utf-8")
+
+    # Applying twice must be idempotent.
+    with postgres_security_engine.begin() as connection:
+        connection.exec_driver_sql(migration_sql)
+        connection.exec_driver_sql(migration_sql)
+
+    dsn = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://", 1)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as listener:
+            listener.execute("LISTEN sireader_observability_v1")
+
+            statements = [
+                """
+                INSERT INTO public.runtime_control_state
+                (id, execution_mode, trading_mode, auto_execution_enabled, auto_paused, updated_at)
+                VALUES (2, 'APPROVAL', 'DRY_RUN', false, true, now())
+                """,
+                """
+                INSERT INTO public.ai_usage_logs
+                (usage_date, provider, model, tier, input_tokens, output_tokens,
+                 cache_read_tokens, cache_write_tokens, thinking_tokens, billing_currency,
+                 cost_rp, reserved_rp, cost_usd, reserved_usd, status, created_at)
+                VALUES (current_date, 'ci', 'notify-model', 'FAST', 1, 1, 0, 0, 0, 'IDR',
+                        0, 0, 0, 0, 'COMPLETED', now())
+                """,
+                """
+                INSERT INTO public.ai_analysis_logs (chat_id, target_message_id, status, created_at)
+                VALUES (123, 789, 'PROCESSING', now())
+                """,
+                """
+                INSERT INTO public.ai_pending_messages
+                (dedup_key, chat_id, telegram_message_id, status, reason, attempts, created_at, updated_at)
+                VALUES ('notify-dedup', 123, 789, 'PENDING', 'BLOCKED_HARD_BUDGET', 0, now(), now())
+                """,
+                """
+                INSERT INTO public.trade_decision_watches
+                (symbol, broker_server, status, spread_pips, maximum_spread_pips,
+                 check_count, next_check_at, created_at, updated_at)
+                VALUES ('XAUUSD', 'ci', 'WAITING_FOR_SPREAD', 1, 30, 1, now(), now(), now())
+                """,
+                """
+                INSERT INTO public.approval_decisions
+                (analysis_log_id, previous_status, decision, new_status, created_at)
+                VALUES (2, 'MANUAL_REVIEW', 'APPROVED', 'APPROVED', now())
+                """,
+            ]
+            for statement in statements:
+                with postgres_security_engine.begin() as writer:
+                    writer.exec_driver_sql(statement)
+
+            notifications = list(listener.notifies(timeout=1.0, stop_after=20))
+            payloads = [notification.payload for notification in notifications]
+            assert len(payloads) == 6
+            assert set(payloads) == {
+                "system", "telemetry", "pipeline", "market_watches", "audit"
+            }
+            assert all(payload in {"system", "telemetry", "pipeline", "market_watches", "audit"}
+                       for payload in payloads)
+
+            # A no-op UPDATE must not create a notification.
+            with postgres_security_engine.begin() as writer:
+                writer.exec_driver_sql(
+                    "UPDATE public.runtime_control_state "
+                    "SET trading_mode = 'DRY_RUN' WHERE id = 2"
+                )
+            assert list(listener.notifies(timeout=0.2, stop_after=1)) == []
+
+            # Notifications from a rolled-back transaction must not be delivered.
+            writer = postgres_security_engine.connect()
+            transaction = writer.begin()
+            writer.exec_driver_sql(
+                """
+                INSERT INTO public.runtime_control_state
+                (id, execution_mode, trading_mode, auto_execution_enabled, auto_paused, updated_at)
+                VALUES (3, 'APPROVAL', 'DRY_RUN', false, true, now())
+                """
+            )
+            transaction.rollback()
+            writer.close()
+            assert list(listener.notifies(timeout=0.2, stop_after=1)) == []
+    finally:
+        with postgres_security_engine.begin() as connection:
+            connection.exec_driver_sql(rollback_sql)
