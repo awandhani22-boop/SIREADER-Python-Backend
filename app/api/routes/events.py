@@ -51,6 +51,8 @@ async def stream_observability_events(
                     return
                 event = await hub.next_event(subscription)
                 if event is None:
+                    if subscription.closed:
+                        return
                     yield ": ping\n\n"
                     continue
                 yield event.to_sse()
