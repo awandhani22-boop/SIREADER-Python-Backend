@@ -151,21 +151,26 @@ def test_sse_endpoint_streams_event_and_heartbeat_headers(monkeypatch):
 
     monkeypatch.setattr(api_settings, "SIREADER_API_AUTH_TOKEN", SECRET)
     hub = _ready_hub()
+    previous = hub.publish_resources(["system"])
+    pending = hub.publish_resources(["pipeline"])
+    assert previous is not None and pending is not None
     app = create_app(manage_database_lifecycle=False, event_hub=hub)
     with TestClient(app) as client:
         with client.stream(
             "GET",
             "/api/v1/events/stream",
-            headers={"Authorization": f"Bearer {SECRET}"},
+            headers={
+                "Authorization": f"Bearer {SECRET}",
+                "Last-Event-ID": previous.event_id,
+            },
         ) as response:
             assert response.status_code == 200
             assert response.headers["content-type"].startswith("text/event-stream")
             assert response.headers["cache-control"] == "no-cache, no-transform"
             assert response.headers["x-accel-buffering"] == "no"
-            # EventSource clients receive an initial 15-second heartbeat. In tests,
-            # inject an event in a separate task after the stream has subscribed.
-            hub.publish_resources(["pipeline"])
-            chunks = response.iter_text()
-            first = next(chunks)
-            assert "event: resources.invalidated" in first
-            assert '"resources":["pipeline"]' in first
+            chunks = iter(response.iter_text())
+            retry_hint = next(chunks)
+            event_frame = next(chunks)
+            assert "retry: 3000" in retry_hint
+            assert "event: resources.invalidated" in event_frame
+            assert '"resources":["pipeline"]' in event_frame
