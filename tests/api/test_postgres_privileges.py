@@ -553,6 +553,12 @@ def test_postgres_observability_notify_triggers_are_minimal_and_commit_scoped(po
                 )
             assert list(listener.notifies(timeout=0.2, stop_after=1)) == []
 
+            # Table truncation invalidates the corresponding snapshot once per statement.
+            with postgres_security_engine.begin() as writer:
+                writer.exec_driver_sql("TRUNCATE public.approval_decisions")
+            truncated = list(listener.notifies(timeout=0.2, stop_after=1))
+            assert [notification.payload for notification in truncated] == ["audit"]
+
             # Notifications from a rolled-back transaction must not be delivered.
             writer = postgres_security_engine.connect()
             transaction = writer.begin()
