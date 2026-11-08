@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - phase-3-1-api-gateway
+      - phase-3-3-sse-implementation
   pull_request:
     branches:
       - main
@@ -55,7 +56,9 @@ jobs:
             tests/api/test_dependencies_auth.py \
             tests/api/test_security.py \
             tests/api/test_endpoints.py \
-            tests/api/test_postgres_privileges.py
+            tests/api/test_postgres_privileges.py \
+            tests/api/test_event_stream.py \
+            tests/api/test_event_migration_postgres.py
 
       - name: Compile API package
         run: |

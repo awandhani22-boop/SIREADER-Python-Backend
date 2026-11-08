@@ -14,12 +14,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api.config import api_settings
 from app.api.database import ro_session_factory
 from app.api.dependencies import verify_bearer_token
+from app.api.event_stream import EventHub, PostgresNotifyListener
 from app.api.routes import (
     audit_router,
     market_watches_router,
     pipeline_router,
     system_router,
     telemetry_router,
+    events_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -465,8 +467,12 @@ def _validate_live_database_session() -> None:
 def create_app(*, manage_database_lifecycle: bool = True) -> FastAPI:
     """Lifecycle dinonaktifkan hanya untuk test yang mengganti dependency DB."""
 
+    event_hub = EventHub()
+    listener: PostgresNotifyListener | None = None
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        nonlocal listener
         initialized = False
         try:
             if manage_database_lifecycle:
@@ -474,8 +480,18 @@ def create_app(*, manage_database_lifecycle: bool = True) -> FastAPI:
                 ro_session_factory.initialize()
                 initialized = True
                 _validate_live_database_session()
+                listener = PostgresNotifyListener(
+                    event_hub,
+                    api_settings.get_api_database_url,
+                )
+                listener.start()
             yield
         finally:
+            if listener is not None:
+                await listener.stop()
+                listener = None
+            else:
+                event_hub.close()
             if manage_database_lifecycle and initialized:
                 ro_session_factory.close()
 
@@ -486,6 +502,7 @@ def create_app(*, manage_database_lifecycle: bool = True) -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+    app.state.event_hub = event_hub
     app.add_middleware(
         CORSMiddleware,
         allow_origins=api_settings.cors_origins_list,
@@ -510,6 +527,7 @@ def create_app(*, manage_database_lifecycle: bool = True) -> FastAPI:
         pipeline_router,
         market_watches_router,
         audit_router,
+        events_router,
     ):
         app.include_router(route, dependencies=[Depends(verify_bearer_token)])
     return app
