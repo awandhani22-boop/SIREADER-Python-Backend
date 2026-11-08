@@ -1,7 +1,9 @@
 """Application factory dan entry point Uvicorn untuk API Gateway mandiri."""
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+import asyncio
 import logging
+import sys
 from typing import Any, AsyncIterator
 
 import uvicorn
@@ -540,6 +542,14 @@ def run() -> None:
     host = validate_local_bind_host(api_settings.API_HOST)
     if not 1 <= api_settings.API_PORT <= 65535:
         raise RuntimeError("API_PORT harus berada pada rentang 1..65535.")
+
+    # Psycopg's async socket notifications require a SelectorEventLoop on Windows.
+    # Uvicorn's single-worker Windows default is ProactorEventLoop, which is
+    # incompatible with psycopg AsyncConnection.notifies().
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        logger.info("Windows SelectorEventLoop enabled for PostgreSQL SSE listener.")
+
     uvicorn.run(app, host=host, port=api_settings.API_PORT, workers=1)
 
 
