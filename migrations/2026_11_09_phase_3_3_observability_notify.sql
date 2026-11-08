@@ -62,8 +62,9 @@ CREATE TRIGGER sireader_observability_notify
 AFTER INSERT OR UPDATE OR DELETE ON public.trade_decision_watches
 FOR EACH ROW EXECUTE FUNCTION public.sireader_notify_observability_change();
 
+-- Approval audit records are append-only: only INSERT creates a new audit event.
 DROP TRIGGER IF EXISTS sireader_observability_notify
     ON public.approval_decisions;
 CREATE TRIGGER sireader_observability_notify
-AFTER INSERT OR UPDATE OR DELETE ON public.approval_decisions
+AFTER INSERT ON public.approval_decisions
 FOR EACH ROW EXECUTE FUNCTION public.sireader_notify_observability_change();
