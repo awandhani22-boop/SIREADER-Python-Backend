@@ -45,6 +45,33 @@ def test_observability_migration_is_idempotent_and_transactional():
             admin.execute(migration, prepare=False)
             admin.execute(migration, prepare=False)  # DROP + CREATE proves idempotency.
 
+            inventory = admin.execute(
+                """
+                SELECT
+                    count(DISTINCT c.relname) FILTER (
+                        WHERE t.tgname = 'sireader_observability_notify'
+                    )::int,
+                    count(DISTINCT c.relname) FILTER (
+                        WHERE t.tgname = 'sireader_observability_truncate'
+                    )::int,
+                    count(*) FILTER (WHERE p.prosecdef)::int
+                FROM pg_catalog.pg_trigger AS t
+                JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid
+                JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+                WHERE n.nspname = 'public'
+                  AND NOT t.tgisinternal
+                  AND c.relname = ANY (ARRAY[
+                      'runtime_control_state', 'ai_usage_logs', 'ai_analysis_logs',
+                      'ai_pending_messages', 'trade_decision_watches', 'approval_decisions'
+                  ])
+                  AND t.tgname IN (
+                      'sireader_observability_notify', 'sireader_observability_truncate'
+                  )
+                """
+            ).fetchone()
+            assert inventory == (6, 6, 0)
+
             with psycopg.connect(PSYCOPG_URL, autocommit=True) as listener:
                 listener.execute("SET default_transaction_read_only = on")
                 assert listener.execute("SHOW transaction_read_only").fetchone()[0] == "on"

@@ -10,6 +10,7 @@ from app.api.event_stream import (
     EventHub,
     EventStreamUnavailable,
     SubscriberLimitReached,
+    validate_trigger_inventory,
 )
 from app.api.server import create_app
 
@@ -18,6 +19,16 @@ SECRET = "test-only-api-secret"
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def test_listener_readiness_requires_all_six_safe_trigger_pairs():
+    validate_trigger_inventory(6, 6, 0)
+    with pytest.raises(RuntimeError):
+        validate_trigger_inventory(0, 0, 0)
+    with pytest.raises(RuntimeError):
+        validate_trigger_inventory(6, 5, 0)
+    with pytest.raises(RuntimeError):
+        validate_trigger_inventory(6, 6, 1)
 
 
 def test_event_envelope_contains_only_allowlisted_resource_metadata():

@@ -44,6 +44,20 @@ class SubscriberLimitReached(RuntimeError):
     """The bounded subscriber limit has been reached."""
 
 
+def validate_trigger_inventory(
+    row_trigger_tables: int,
+    truncate_trigger_tables: int,
+    security_definer_functions: int,
+) -> None:
+    """Fail closed unless every expected table has safe row and TRUNCATE triggers."""
+    if (
+        row_trigger_tables != 6
+        or truncate_trigger_tables != 6
+        or security_definer_functions != 0
+    ):
+        raise RuntimeError("SSE notification migration is missing or unsafe.")
+
+
 @dataclass(frozen=True)
 class StreamMessage:
     event: str
@@ -320,6 +334,43 @@ class PostgresNotifyListener:
             raise RuntimeError("SSE listener requires the configured PostgreSQL API URL.")
         return url.set(drivername="postgresql").render_as_string(hide_password=False)
 
+    async def _verify_migration(self, connection: object) -> None:
+        cursor = await connection.execute(
+            """
+            SELECT
+                count(DISTINCT c.relname) FILTER (
+                    WHERE t.tgname = 'sireader_observability_notify'
+                )::int AS row_trigger_tables,
+                count(DISTINCT c.relname) FILTER (
+                    WHERE t.tgname = 'sireader_observability_truncate'
+                )::int AS truncate_trigger_tables,
+                count(*) FILTER (WHERE p.prosecdef)::int AS security_definer_functions
+            FROM pg_catalog.pg_trigger AS t
+            JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid
+            JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+            WHERE n.nspname = 'public'
+              AND NOT t.tgisinternal
+              AND c.relname = ANY (ARRAY[
+                  'runtime_control_state',
+                  'ai_usage_logs',
+                  'ai_analysis_logs',
+                  'ai_pending_messages',
+                  'trade_decision_watches',
+                  'approval_decisions'
+              ])
+              AND t.tgname IN (
+                  'sireader_observability_notify',
+                  'sireader_observability_truncate'
+              )
+            """
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            validate_trigger_inventory(0, 0, 1)
+            return
+        validate_trigger_inventory(int(row[0]), int(row[1]), int(row[2]))
+
     async def _run(self) -> None:
         from psycopg import AsyncConnection
 
@@ -339,6 +390,7 @@ class PostgresNotifyListener:
                     keepalives_count=3,
                 )
                 await connection.execute("LISTEN sireader_observability_v1")
+                await self._verify_migration(connection)
                 self._hub.set_listener_ready(True)
                 delay = 1.0
                 async for notification in connection.notifies():
