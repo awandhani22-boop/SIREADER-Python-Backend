@@ -122,9 +122,8 @@ Do not run concurrently with a manually started database migration. The routine 
 ## Verified implementation snapshot — 2026-11-10
 
 - Backend branch: `phase-5-implementation`.
-- Backend policy/maintenance implementation commit: `1568435e092fc3b59bb271a9eef9d24981daa8e8`; documentation closeout branch HEAD: `6fc26d153f76a37b0fc6cecfd3e58faaa0955b39`.
-- [CI run 42671067597 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42671067597): 187 API tests passed, 76 core regression tests passed, compile step successful.
-- [Budget observability CI run 42667794174 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42667794174): 177 API tests and 75 core regression tests passed.
-- These checks use disposable test infrastructure. They do not deploy migrations to Supabase LIVE, start a paid provider, or register an OS-level maintenance task.
-
-- Documentation closeout [CI run 42671597785 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42671597785).
+- Latest backend implementation and Windows Task Scheduler helper commit: `5b00acc83fc7ac738a26d188fe8851a30c2a0ce8`.
+- [Latest backend CI run 42698878591 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42698878591): 188 API tests passed, 76 core regression tests passed, and API compile succeeded.
+- The current commit adds `scripts/register_workforce_maintenance.ps1`, which registers/removes `SIREADER-WorkforceMaintenance` on the local Windows machine. It has not been executed on the owner's machine; no OS-level task is claimed as registered.
+- Earlier budget observability and policy/maintenance CI evidence remains in the Phase 5 execution report.
+- CI uses disposable test infrastructure. It does not deploy migrations to Supabase LIVE, start a paid provider, or register a local Windows scheduled task.
