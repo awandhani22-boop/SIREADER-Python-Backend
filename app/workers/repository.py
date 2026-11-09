@@ -148,8 +148,12 @@ def enqueue_task(db: Session, *, task_type: str, title: str, required_capability
                  max_attempts: int = 3, not_before: datetime | None = None,
                  deadline_at: datetime | None = None) -> tuple[WorkTaskRecord, bool]:
     """Create one generic task; a repeated idempotency key returns the original row."""
-    if len(idempotency_key) < 8 or len(idempotency_key) > 128:
+    if not isinstance(idempotency_key, str) or len(idempotency_key) < 8 or len(idempotency_key) > 128:
         raise ValueError("idempotency_key must contain 8..128 characters")
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 180:
+        raise ValueError("title must contain 1..180 characters")
+    if correlation_id is not None and (len(correlation_id) < 8 or len(correlation_id) > 64):
+        raise ValueError("correlation_id must contain 8..64 characters")
     if required_capability not in CAPABILITY_CATALOG:
         raise ValueError("unknown required capability")
     if task_type not in CAPABILITY_CATALOG[required_capability].task_types:
@@ -171,7 +175,7 @@ def enqueue_task(db: Session, *, task_type: str, title: str, required_capability
             raise ValueError("requested worker does not have the required capability")
     row = WorkTaskRecord(
         task_id=uuid4().hex, idempotency_key=idempotency_key, correlation_id=correlation_id,
-        schema_version=1, task_type=task_type, title=title[:180],
+        schema_version=1, task_type=task_type, title=title.strip(),
         required_capability=required_capability, requested_worker_id=requested_worker_id,
         priority=int(priority), status=TaskStatus.QUEUED.value, input_payload=payload,
         attempts=0, max_attempts=int(max_attempts), not_before=_now(not_before or now),
@@ -253,6 +257,11 @@ def claim_next_task(db: Session, *, worker_id: str, instance_id: str,
         score = min(100, int(task.priority) + age_minutes // AGING_INTERVAL_MINUTES)
         return (-score, _now(task.created_at), task.task_id)
     task = sorted(candidates, key=effective_priority)[0]
+    current_status = TaskStatus(task.status)
+    if current_status is TaskStatus.RETRY_WAIT:
+        validate_task_transition(TaskStatus.RETRY_WAIT, TaskStatus.QUEUED)
+        task.status = TaskStatus.QUEUED.value
+    validate_task_transition(TaskStatus(task.status), TaskStatus.CLAIMED)
     token = uuid4().hex
     task.status = TaskStatus.CLAIMED.value
     task.assigned_worker_id = worker_id
@@ -276,20 +285,20 @@ def claim_next_task(db: Session, *, worker_id: str, instance_id: str,
     return task, attempt
 
 
-def _locked_task_attempt(db: Session, task_id: str, lease_token: str) -> tuple[WorkTaskRecord, WorkTaskAttemptRecord]:
+def _locked_task_attempt(db: Session, task_id: str, lease_token: str, now: datetime | None = None) -> tuple[WorkTaskRecord, WorkTaskAttemptRecord]:
     task = db.scalar(select(WorkTaskRecord).where(WorkTaskRecord.task_id == task_id).with_for_update())
     attempt = db.scalar(select(WorkTaskAttemptRecord).where(WorkTaskAttemptRecord.lease_token == lease_token).with_for_update())
     if task is None or attempt is None or attempt.task_id != task_id:
         raise LeaseConflictError("task lease or attempt was not found")
     if task.lease_token != lease_token or task.status not in (TaskStatus.CLAIMED.value, TaskStatus.RUNNING.value):
         raise LeaseConflictError("task lease is no longer owned by this attempt")
-    if task.lease_expires_at is None or _now(task.lease_expires_at) <= datetime.now(timezone.utc):
+    if task.lease_expires_at is None or _now(task.lease_expires_at) <= _now(now):
         raise LeaseConflictError("task lease has expired")
     return task, attempt
 
 
 def start_task(db: Session, *, task_id: str, lease_token: str, now: datetime | None = None) -> WorkTaskRecord:
-    task, attempt = _locked_task_attempt(db, task_id, lease_token)
+    task, attempt = _locked_task_attempt(db, task_id, lease_token, now)
     validate_task_transition(TaskStatus(task.status), TaskStatus.RUNNING)
     stamp = _now(now)
     task.status = TaskStatus.RUNNING.value
@@ -302,7 +311,7 @@ def start_task(db: Session, *, task_id: str, lease_token: str, now: datetime | N
 
 
 def mark_provider_requested(db: Session, *, task_id: str, lease_token: str, now: datetime | None = None) -> WorkTaskAttemptRecord:
-    task, attempt = _locked_task_attempt(db, task_id, lease_token)
+    task, attempt = _locked_task_attempt(db, task_id, lease_token, now)
     if task.status != TaskStatus.RUNNING.value or attempt.status != AttemptStatus.STARTED.value:
         raise LeaseConflictError("task must be RUNNING before provider request")
     stamp = _now(now)
@@ -317,7 +326,7 @@ def mark_provider_requested(db: Session, *, task_id: str, lease_token: str, now:
 def renew_task_lease(db: Session, *, task_id: str, lease_token: str, lease_seconds: int = 45, now: datetime | None = None) -> datetime:
     if not 5 <= int(lease_seconds) <= MAX_LEASE_SECONDS:
         raise ValueError("lease_seconds must be between 5 and 600")
-    task, _ = _locked_task_attempt(db, task_id, lease_token)
+    task, _ = _locked_task_attempt(db, task_id, lease_token, now)
     expiry = _now(now) + timedelta(seconds=int(lease_seconds))
     task.lease_expires_at = expiry
     task.updated_at = _now(now)
@@ -328,7 +337,7 @@ def renew_task_lease(db: Session, *, task_id: str, lease_token: str, lease_secon
 def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload: dict,
                   billing_currency: str | None = None, cost_amount: str | None = None,
                   now: datetime | None = None) -> WorkTaskRecord:
-    task, attempt = _locked_task_attempt(db, task_id, lease_token)
+    task, attempt = _locked_task_attempt(db, task_id, lease_token, now)
     payload = _validate_payload(result_payload)
     stamp = _now(now)
     validate_task_transition(TaskStatus(task.status), TaskStatus.COMPLETED)
@@ -359,7 +368,7 @@ def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload
 def fail_task(db: Session, *, task_id: str, lease_token: str, error_code: str,
               retryable: bool = False, outcome_unknown: bool = False,
               backoff_seconds: int = 30, now: datetime | None = None) -> WorkTaskRecord:
-    task, attempt = _locked_task_attempt(db, task_id, lease_token)
+    task, attempt = _locked_task_attempt(db, task_id, lease_token, now)
     stamp = _now(now)
     safe_code = (error_code or "WORKER_FAILED")[:80]
     provider_was_requested = bool(attempt.provider_request_id) or attempt.status == AttemptStatus.PROVIDER_REQUESTED.value
@@ -368,20 +377,24 @@ def fail_task(db: Session, *, task_id: str, lease_token: str, error_code: str,
     attempt.error_code = safe_code
     attempt.finished_at = stamp
     if outcome_unknown or provider_was_requested:
+        validate_task_transition(TaskStatus(task.status), TaskStatus.WAITING_REVIEW)
         task.status = TaskStatus.WAITING_REVIEW.value
         attempt.status = AttemptStatus.UNKNOWN.value
         event = ActivityEventType.TASK_WAITING_REVIEW
     elif retryable and task.attempts < task.max_attempts:
+        validate_task_transition(TaskStatus(task.status), TaskStatus.RETRY_WAIT)
         delay = min(3600, max(1, int(backoff_seconds)))
         task.status = TaskStatus.RETRY_WAIT.value
         task.not_before = stamp + timedelta(seconds=delay)
         attempt.status = AttemptStatus.FAILED.value
         event = ActivityEventType.TASK_RETRIED
     elif task.attempts >= task.max_attempts:
+        validate_task_transition(TaskStatus(task.status), TaskStatus.DEAD_LETTERED)
         task.status = TaskStatus.DEAD_LETTERED.value
         attempt.status = AttemptStatus.FAILED.value
         event = ActivityEventType.TASK_DEAD_LETTERED
     else:
+        validate_task_transition(TaskStatus(task.status), TaskStatus.FAILED)
         task.status = TaskStatus.FAILED.value
         attempt.status = AttemptStatus.FAILED.value
         event = ActivityEventType.TASK_FAILED
@@ -406,12 +419,14 @@ def cancel_task(db: Session, *, task_id: str, now: datetime | None = None) -> Wo
         active_attempt = db.scalar(select(WorkTaskAttemptRecord).where(WorkTaskAttemptRecord.lease_token == task.lease_token).with_for_update())
     provider_was_requested = bool(active_attempt and (active_attempt.provider_request_id or active_attempt.status == AttemptStatus.PROVIDER_REQUESTED.value))
     if provider_was_requested:
+        validate_task_transition(status, TaskStatus.WAITING_REVIEW)
         task.status = TaskStatus.WAITING_REVIEW.value
         active_attempt.status = AttemptStatus.UNKNOWN.value
         active_attempt.error_code = "CANCEL_AFTER_PROVIDER_REQUEST"
         active_attempt.finished_at = stamp
         event_type = ActivityEventType.TASK_WAITING_REVIEW
     else:
+        validate_task_transition(status, TaskStatus.CANCELLED)
         task.status = TaskStatus.CANCELLED.value
         if active_attempt is not None:
             active_attempt.status = AttemptStatus.CANCELLED.value
@@ -441,12 +456,14 @@ def recover_expired_leases(db: Session, *, now: datetime | None = None, base_bac
         attempt = db.scalar(select(WorkTaskAttemptRecord).where(WorkTaskAttemptRecord.lease_token == task.lease_token).with_for_update())
         provider_was_requested = bool(attempt and (attempt.provider_request_id or attempt.status == AttemptStatus.PROVIDER_REQUESTED.value))
         if provider_was_requested:
+            validate_task_transition(TaskStatus(task.status), TaskStatus.WAITING_REVIEW)
             task.status = TaskStatus.WAITING_REVIEW.value
             attempt.status = AttemptStatus.UNKNOWN.value
             attempt.error_code = "LEASE_EXPIRED_AFTER_PROVIDER_REQUEST"
             recovered["waiting_review"] += 1
             event = ActivityEventType.TASK_WAITING_REVIEW
-        elif task.attempts < task.max_attempts:
+        elif task.attempts < task.max_attempts and (task.deadline_at is None or _now(task.deadline_at) > stamp):
+            validate_task_transition(TaskStatus(task.status), TaskStatus.RETRY_WAIT)
             task.status = TaskStatus.RETRY_WAIT.value
             task.not_before = stamp + timedelta(seconds=min(3600, max(1, base_backoff_seconds * (2 ** max(0, task.attempts - 1)))))
             if attempt is not None:
@@ -455,6 +472,7 @@ def recover_expired_leases(db: Session, *, now: datetime | None = None, base_bac
             recovered["requeued"] += 1
             event = ActivityEventType.TASK_RETRIED
         else:
+            validate_task_transition(TaskStatus(task.status), TaskStatus.DEAD_LETTERED)
             task.status = TaskStatus.DEAD_LETTERED.value
             if attempt is not None:
                 attempt.status = AttemptStatus.TIMED_OUT.value
