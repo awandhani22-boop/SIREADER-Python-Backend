@@ -90,7 +90,7 @@ class WorkTaskRecord(Base):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="QUEUED")
     input_payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    result_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_payload: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     not_before: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
