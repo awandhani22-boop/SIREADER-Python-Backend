@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.config import settings
+from app.workers.policy import SensitiveTaskAction, evaluate_workforce_policy
 from app.database.connection import SessionLocal
 from app.workers.models import WorkerDefinitionRecord, WorkerCapabilityAssignmentRecord
 from app.workers.provider import (
@@ -190,6 +191,7 @@ def run_worker_once(
             attempt_id = claimed[1].attempt_id
             lease_token = claimed[1].lease_token
             task_type = claimed[0].task_type
+            required_capability = claimed[0].required_capability
             title = claimed[0].title
             input_payload = dict(claimed[0].input_payload or {})
             correlation_id = claimed[0].correlation_id
@@ -197,6 +199,27 @@ def run_worker_once(
     try:
         with SessionLocal() as db:
             worker = _load_worker_contract(db, worker_id)
+        policy = evaluate_workforce_policy(
+            worker=worker,
+            task_type=task_type,
+            required_capability=required_capability,
+            title=title,
+            input_payload=input_payload,
+            provider_mode=settings.WORKER_PROVIDER_MODE,
+        )
+        if policy.action is SensitiveTaskAction.REJECT:
+            with SessionLocal() as db:
+                with db.begin():
+                    fail_task(
+                        db, task_id=task_id, lease_token=lease_token,
+                        error_code=policy.reason_code,
+                        retryable=False, outcome_unknown=False,
+                    )
+            logger.warning(
+                "WORKER_GOVERNANCE_POLICY_REJECTED worker_id=%s task_id=%s policy_version=%s reason=%s",
+                worker_id, task_id, policy.policy_version, policy.reason_code,
+            )
+            return True
         provider = create_worker_provider(worker)
     except Exception as exc:
         with SessionLocal() as db:
@@ -261,10 +284,15 @@ def run_worker_once(
     request = WorkerExecutionRequest(
         task_id=task_id,
         task_type=task_type,
-        title=title,
-        input_payload=input_payload,
+        required_capability=required_capability,
+        title=policy.sanitized_title,
+        input_payload=policy.sanitized_input,
         correlation_id=correlation_id,
         attempt_request_id=attempt_id,
+        model_tier=policy.model_tier,
+        policy_version=policy.policy_version,
+        sensitive_action=policy.action.value,
+        requires_human_review=policy.requires_human_review,
     )
 
     try:
@@ -282,10 +310,15 @@ def run_worker_once(
                 request = WorkerExecutionRequest(
                     task_id=original_request.task_id,
                     task_type=original_request.task_type,
+                    required_capability=original_request.required_capability,
                     title=original_request.title,
                     input_payload=original_request.input_payload,
                     correlation_id=original_request.correlation_id,
                     attempt_request_id=original_request.attempt_request_id,
+                    model_tier=original_request.model_tier,
+                    policy_version=original_request.policy_version,
+                    sensitive_action=original_request.sensitive_action,
+                    requires_human_review=original_request.requires_human_review,
                     on_provider_reserved=tracked_callback,
                 )
             result = provider.execute(worker, request)
@@ -302,6 +335,15 @@ def run_worker_once(
                     result_payload={**result.result_payload, "source": result.source},
                     billing_currency=result.billing_currency,
                     cost_amount=result.cost_amount,
+                    force_human_review=result.requires_human_review,
+                    review_trigger_reason="SENSITIVE_TASK_REVIEW" if result.requires_human_review else None,
+                    policy_context={
+                        "policy_version": policy.policy_version,
+                        "sensitive_action": policy.action.value,
+                        "model_tier": policy.model_tier,
+                        "reason_code": policy.reason_code,
+                        "redacted_fields": policy.redacted_fields,
+                    },
                     now=_utc_now(),
                 )
         return True

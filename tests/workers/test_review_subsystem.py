@@ -28,6 +28,9 @@ from app.governance.review_policy import (
     ReviewTriggerMode,
     evaluate_review_eligibility,
 )
+from app.workers.policy import (
+    POLICY_VERSION, SensitiveTaskAction, evaluate_workforce_policy,
+)
 from app.workers.models import (
     ActorType,
     WorkActivityEventRecord,
@@ -37,7 +40,7 @@ from app.workers.models import (
     WorkforceTaskReviewPayloadRecord,
     WorkforceTaskReviewRecord,
 )
-from app.workers.registry import CAPABILITY_CATALOG
+from app.workers.registry import CAPABILITY_CATALOG, build_default_registry
 from app.workers.repository import (
     WorkforceRepositoryError,
     claim_next_task,
@@ -1094,3 +1097,103 @@ def test_migration_forward_rollback_forward_lifecycle():
             "SELECT 1 FROM information_schema.tables WHERE table_name = 'workforce_task_reviews'"
         ).fetchone()
         assert recreated is not None
+
+
+def test_workforce_policy_routes_model_tier_from_capability_and_worker():
+    registry = build_default_registry()
+    cases = [
+        ("haiku", "quick_research", "QUICK_RESEARCH", "FAST"),
+        ("sonnet", "data_analysis", "DATA_ANALYSIS", "REASONING"),
+        ("opus", "strategic_analysis", "STRATEGIC_ANALYSIS", "ESCALATION"),
+    ]
+    for worker_id, capability, task_type, expected_tier in cases:
+        result = evaluate_workforce_policy(
+            worker=registry[worker_id], task_type=task_type,
+            required_capability=capability, title="Safe task",
+            input_payload={"record": "plain"}, provider_mode="OMNIROUTE",
+        )
+        assert result.action is SensitiveTaskAction.ALLOW
+        assert result.model_tier == expected_tier
+        assert result.policy_version == POLICY_VERSION
+        assert result.requires_human_review is False
+
+
+def test_workforce_policy_redacts_credentials_before_any_provider_request():
+    registry = build_default_registry()
+    result = evaluate_workforce_policy(
+        worker=registry["haiku"], task_type="QUICK_RESEARCH",
+        required_capability="quick_research", title="Research bearer token",
+        input_payload={
+            "api_token": "private-value",
+            "description": "Use Bearer abc.def.ghi only as sample",
+        },
+        provider_mode="OMNIROUTE",
+    )
+    assert result.action is SensitiveTaskAction.REDACT
+    assert result.sanitized_input["api_token"] == REDACTED
+    assert "private-value" not in str(result.sanitized_input)
+    assert "Bearer abc.def.ghi" not in str(result.sanitized_input)
+    assert result.requires_human_review is False
+
+
+def test_workforce_policy_personal_data_is_redacted_and_forces_output_review():
+    registry = build_default_registry()
+    result = evaluate_workforce_policy(
+        worker=registry["sonnet"], task_type="DATA_ANALYSIS",
+        required_capability="data_analysis", title="Analyze contact list",
+        input_payload={
+            "customer": {"email": "person@example.com", "status": "active"},
+        },
+        provider_mode="OMNIROUTE",
+    )
+    assert result.action is SensitiveTaskAction.REVIEW
+    assert result.sanitized_input["customer"]["email"] == "[REDACTED_PERSONAL_DATA]"
+    assert result.requires_human_review is True
+    assert result.redacted_fields == 1
+
+
+def test_workforce_policy_rejects_live_execution_private_keys_and_market_workers():
+    registry = build_default_registry()
+    trade = evaluate_workforce_policy(
+        worker=registry["haiku"], task_type="QUICK_RESEARCH",
+        required_capability="quick_research", title="Execute a live trade",
+        input_payload={"request": "ordinary research"}, provider_mode="OMNIROUTE",
+    )
+    private_key = evaluate_workforce_policy(
+        worker=registry["haiku"], task_type="QUICK_RESEARCH",
+        required_capability="quick_research", title="Inspect this key",
+        input_payload={"data": "-----BEGIN PRIVATE KEY-----\nsecret"},
+        provider_mode="OMNIROUTE",
+    )
+    market = evaluate_workforce_policy(
+        worker=registry["market_monitor"], task_type="MARKET_WATCH",
+        required_capability="market_monitoring_simulation",
+        title="Summarize simulated market feed", input_payload={"ticks": []},
+        provider_mode="OMNIROUTE",
+    )
+    assert trade.action is SensitiveTaskAction.REJECT
+    assert private_key.action is SensitiveTaskAction.REJECT
+    assert market.action is SensitiveTaskAction.REJECT
+    assert market.reason_code == "LIVE_PROVIDER_WORKER_FORBIDDEN"
+
+
+def test_workforce_policy_fails_closed_on_capability_task_mismatch():
+    registry = build_default_registry()
+    result = evaluate_workforce_policy(
+        worker=registry["haiku"], task_type="STRATEGIC_ANALYSIS",
+        required_capability="quick_research", title="Mismatched task",
+        input_payload={}, provider_mode="OMNIROUTE",
+    )
+    assert result.action is SensitiveTaskAction.REJECT
+    assert result.reason_code == "CAPABILITY_TASK_MISMATCH"
+
+
+def test_workforce_policy_mock_mode_never_routes_provider_tier_to_excluded_workers():
+    registry = build_default_registry()
+    result = evaluate_workforce_policy(
+        worker=registry["market_monitor"], task_type="MARKET_WATCH",
+        required_capability="market_monitoring_simulation",
+        title="Simulated feed", input_payload={"ticks": []}, provider_mode="MOCK",
+    )
+    assert result.action is SensitiveTaskAction.ALLOW
+    assert result.model_tier == "NONE"

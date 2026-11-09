@@ -30,6 +30,11 @@ class WorkerExecutionRequest:
     input_payload: dict[str, object]
     correlation_id: str
     attempt_request_id: str
+    required_capability: str = "unknown"
+    model_tier: str = "NONE"
+    policy_version: str = "2026.11.10"
+    sensitive_action: str = "ALLOW"
+    requires_human_review: bool = False
     cancellation: Event | None = None
     on_provider_reserved: Callable[[str], None] | None = None
 
@@ -42,6 +47,7 @@ class WorkerProviderResult:
     billing_currency: str | None
     cost_amount: str | None
     usage: dict[str, int] | None
+    requires_human_review: bool = False
 
 
 class WorkerProvider(Protocol):
@@ -72,6 +78,7 @@ class MockWorkerProvider:
             billing_currency=None,
             cost_amount=None,
             usage=None,
+            requires_human_review=request.requires_human_review,
         )
 
 
@@ -85,7 +92,10 @@ class OmniRouteWorkerProvider:
             raise WorkerProviderError("WORKER_HAS_NO_MODEL_TIER", "This worker is not configured for model inference.")
         if not settings.AI_API_KEY or not settings.AI_BASE_URL:
             raise WorkerProviderError("PROVIDER_NOT_CONFIGURED", "Backend AI provider configuration is incomplete.")
-        tier_config = get_tier_config(worker.model_tier)
+        selected_tier = request.model_tier if request.model_tier in {"FAST", "REASONING", "ESCALATION"} else worker.model_tier
+        if selected_tier == "NONE":
+            raise WorkerProviderError("MODEL_TIER_POLICY_REJECTED", "Workforce policy did not authorize a provider model tier.")
+        tier_config = get_tier_config(selected_tier)
         try:
             billing = resolve_billing(tier_config["model"])
         except UnknownModelPricingError as exc:
@@ -122,7 +132,7 @@ class OmniRouteWorkerProvider:
         ]
         try:
             result = omniroute_client.call_ai(
-                tier=worker.model_tier,
+                tier=selected_tier,
                 messages=messages,
                 request_id=request.attempt_request_id,
                 on_reserved=request.on_provider_reserved,
@@ -175,6 +185,7 @@ class OmniRouteWorkerProvider:
             billing_currency=result["billing_currency"],
             cost_amount=str(result["cost"]),
             usage=usage,
+            requires_human_review=request.requires_human_review,
         )
 
 

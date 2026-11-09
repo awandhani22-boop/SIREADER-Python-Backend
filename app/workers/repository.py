@@ -389,6 +389,9 @@ def renew_task_lease(db: Session, *, task_id: str, lease_token: str, lease_secon
 
 def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload: dict,
                   billing_currency: str | None = None, cost_amount: str | None = None,
+                  force_human_review: bool = False,
+                  review_trigger_reason: str | None = None,
+                  policy_context: dict | None = None,
                   now: datetime | None = None) -> WorkTaskRecord:
     task, attempt = _locked_task_attempt(db, task_id, lease_token, now)
     payload = _validate_payload(result_payload)
@@ -414,8 +417,21 @@ def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload
             raise ValueError("cost_amount cannot be negative")
         attempt.cost_amount = amount
 
-    # Evaluate review eligibility (backend-owned policy)
-    requires_review = evaluate_review_eligibility(task.required_capability, task.task_type, task.task_id)
+    if not isinstance(force_human_review, bool):
+        raise ValueError("force_human_review must be boolean")
+    if policy_context is not None:
+        if not isinstance(policy_context, dict) or set(policy_context) != {
+            "policy_version", "sensitive_action", "model_tier", "reason_code", "redacted_fields",
+        }:
+            raise ValueError("policy_context has an invalid shape")
+        if any(not isinstance(policy_context[key], str) or len(policy_context[key]) > 64
+               for key in ("policy_version", "sensitive_action", "model_tier", "reason_code")):
+            raise ValueError("policy_context contains an invalid value")
+        if isinstance(policy_context["redacted_fields"], bool) or not isinstance(policy_context["redacted_fields"], int) or policy_context["redacted_fields"] < 0:
+            raise ValueError("policy_context redacted_fields must be a non-negative integer")
+
+    # Review is either required by capability policy or forced by the backend sensitive-task policy.
+    requires_review = force_human_review or evaluate_review_eligibility(task.required_capability, task.task_type, task.task_id)
     if requires_review:
         # Gated Output Quarantine: unapproved output remains NULL in task
         task.result_payload = None
@@ -453,7 +469,11 @@ def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload
             worker_id=attempt.worker_id,
             task_id=task.task_id,
             attempt_id=attempt.attempt_id,
-            payload={"review_id": review_id, "original_output_sha256": sha256},
+            payload={
+                "review_id": review_id,
+                "original_output_sha256": sha256,
+                "trigger_reason": (review_trigger_reason or "CAPABILITY_REVIEW_POLICY")[:48],
+            },
             occurred_at=stamp,
             actor_type=ActorType.SYSTEM,
             actor_id="system",
@@ -469,7 +489,11 @@ def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload
         worker_id=attempt.worker_id,
         task_id=task.task_id,
         attempt_id=attempt.attempt_id,
-        payload={"source": payload.get("source", "LIVE"), "requires_review": requires_review},
+        payload={
+            "source": payload.get("source", "LIVE"),
+            "requires_review": requires_review,
+            **(policy_context or {}),
+        },
         occurred_at=stamp,
         actor_type=ActorType.WORKER,
         actor_id=attempt.worker_id,
