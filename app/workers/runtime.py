@@ -272,8 +272,8 @@ def run_worker_once(
                 original_request = request
 
                 def tracked_callback(provider_request_id: str) -> None:
-                    lease_keeper.provider_started()
                     persist_provider_reservation(provider_request_id)
+                    lease_keeper.provider_started()
 
                 request = WorkerExecutionRequest(
                     task_id=original_request.task_id,
