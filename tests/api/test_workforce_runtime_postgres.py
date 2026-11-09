@@ -83,7 +83,7 @@ def test_workforce_migration_security_and_task_lifecycle():
                     first, created = enqueue_task(
                         db, task_type="SUMMARIZATION", title="Summarize document",
                         required_capability="summarization", input_payload={"text": "safe test"},
-                        idempotency_key="phase4-idempotency-001", priority=60,
+                        idempotency_key="phase4-idempotency-001", priority=60, now=now,
                     )
                     assert created is True
                     duplicate, duplicate_created = enqueue_task(
@@ -97,7 +97,7 @@ def test_workforce_migration_security_and_task_lifecycle():
                         row, created = enqueue_task(
                             db, task_type="SUMMARIZATION", title=f"Summarize document {idx}",
                             required_capability="summarization", input_payload={"index": idx},
-                            idempotency_key=f"phase4-idempotency-{idx:03d}", priority=50,
+                            idempotency_key=f"phase4-idempotency-{idx:03d}", priority=50, now=now,
                         )
                         assert created
                         task_ids.append(row.task_id)
@@ -105,7 +105,7 @@ def test_workforce_migration_security_and_task_lifecycle():
                         db, task_type="SUMMARIZATION", title="Deadline task",
                         required_capability="summarization", input_payload={"index": 4},
                         idempotency_key="phase4-deadline-004", priority=40,
-                        deadline_at=now + timedelta(seconds=30),
+                        deadline_at=now + timedelta(seconds=30), not_before=now, now=now,
                     )
                     assert deadline_created
                     task_ids.append(deadline_row.task_id)
