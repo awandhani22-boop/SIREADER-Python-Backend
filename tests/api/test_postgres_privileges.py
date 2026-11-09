@@ -7,8 +7,10 @@ It never connects to Supabase or to the user's production database.
 import os
 from pathlib import Path
 
+import psycopg
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from app.api.server import (
@@ -333,15 +335,18 @@ def postgres_security_engine():
         for statement in VIEW_DDL:
             connection.exec_driver_sql(statement)
 
-        # Extend the same disposable security fixture with the Phase 4 workforce
-        # schema and its five allowlisted views before auditing all eleven views.
-        migration_root = Path(__file__).resolve().parents[2] / "migrations"
+    # Apply transactional SQL files through psycopg autocommit, matching the
+    # dedicated disposable-PostgreSQL migration test harness.
+    migration_root = Path(__file__).resolve().parents[2] / "migrations"
+    psycopg_url = make_url(DATABASE_URL).set(drivername="postgresql").render_as_string(hide_password=False)
+    with psycopg.connect(psycopg_url, autocommit=True) as admin:
         for migration_name in (
             "2026_11_09_workforce_runtime_v1.sql",
             "2026_11_09_workforce_api_views_v1.sql",
         ):
-            connection.exec_driver_sql((migration_root / migration_name).read_text())
+            admin.execute((migration_root / migration_name).read_text(), prepare=False)
 
+    with engine.begin() as connection:
         for view_name in VIEW_NAMES:
             connection.exec_driver_sql(
                 f"ALTER VIEW public.{view_name} OWNER TO sireader_view_owner"
