@@ -55,6 +55,8 @@ def test_workforce_migration_security_and_task_lifecycle():
     review_rollback_name = "2026_11_10_workforce_reviews_v1_rollback.sql"
     review_payload_v2_migration_name = "2026_11_10_workforce_review_payload_insert_guard_v2.sql"
     review_payload_v2_rollback_name = "2026_11_10_workforce_review_payload_insert_guard_v2_rollback.sql"
+    review_creation_v3_migration_name = "2026_11_10_workforce_review_creation_boundary_v3.sql"
+    review_creation_v3_rollback_name = "2026_11_10_workforce_review_creation_boundary_v3_rollback.sql"
     budget_migration_name = "2026_11_10_workforce_budget_observability_v1.sql"
     budget_rollback_name = "2026_11_10_workforce_budget_observability_v1_rollback.sql"
 
@@ -99,15 +101,28 @@ def test_workforce_migration_security_and_task_lifecycle():
             _run_migration(admin, root, review_migration_name)  # idempotent review boundary
             _run_migration(admin, root, review_payload_v2_migration_name)
             _run_migration(admin, root, review_payload_v2_migration_name)  # idempotent payload INSERT guard
+            _run_migration(admin, root, review_creation_v3_migration_name)
+            _run_migration(admin, root, review_creation_v3_migration_name)  # idempotent creation privilege guard
             _run_migration(admin, root, budget_migration_name)
             _run_migration(admin, root, budget_migration_name)  # idempotent budget view
             # Verify rollback/forward behavior for both Phase 5 migrations.
             _run_migration(admin, root, budget_rollback_name)
+            _run_migration(admin, root, review_creation_v3_rollback_name)
             _run_migration(admin, root, review_payload_v2_rollback_name)
             _run_migration(admin, root, review_rollback_name)
             _run_migration(admin, root, review_migration_name)
             _run_migration(admin, root, review_payload_v2_migration_name)
+            _run_migration(admin, root, review_creation_v3_migration_name)
             _run_migration(admin, root, budget_migration_name)
+            command_insert_privileges = admin.execute(
+                """
+                SELECT
+                  has_table_privilege('sireader_workforce_cmd', 'public.workforce_task_reviews', 'INSERT'),
+                  has_table_privilege('sireader_workforce_cmd', 'public.workforce_task_review_payloads', 'INSERT')
+                """
+            ).fetchone()
+            assert command_insert_privileges == (False, False)
+
             counts = admin.execute(
                 """
                 SELECT
@@ -420,6 +435,7 @@ def test_workforce_migration_security_and_task_lifecycle():
 
         finally:
             _run_migration(admin, root, budget_rollback_name)
+            _run_migration(admin, root, review_creation_v3_rollback_name)
             _run_migration(admin, root, review_payload_v2_rollback_name)
             _run_migration(admin, root, review_rollback_name)
             _run_migration(admin, root, timeline_rollback_name)

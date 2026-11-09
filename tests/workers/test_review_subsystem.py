@@ -98,6 +98,7 @@ def db_engine():
         # Always apply the review migration to ensure latest triggers and constraints are in place
         admin.execute((root / "migrations" / "2026_11_10_workforce_reviews_v1.sql").read_text(encoding="utf-8"))
         admin.execute((root / "migrations" / "2026_11_10_workforce_review_payload_insert_guard_v2.sql").read_text(encoding="utf-8"))
+        admin.execute((root / "migrations" / "2026_11_10_workforce_review_creation_boundary_v3.sql").read_text(encoding="utf-8"))
 
     engine = create_engine(DATABASE_URL, echo=False)
     yield engine
@@ -923,6 +924,49 @@ def test_db_retention_purge_and_anti_resurrection(db_session: Session):
 
 
 
+
+
+def test_db_initial_review_metadata_must_start_pending(db_session: Session):
+    now = datetime.now(timezone.utc)
+    task_id = f"task_{uuid4().hex[:12]}"
+    attempt_id = f"att_{uuid4().hex[:12]}"
+    review_id = f"rev_{uuid4().hex[:12]}"
+
+    db_session.add(WorkTaskRecord(
+        task_id=task_id,
+        idempotency_key=f"idem_{uuid4().hex[:12]}",
+        correlation_id=f"corr_{uuid4().hex[:12]}",
+        task_type="EVALUATION",
+        title="Initial review metadata guard",
+        required_capability="evaluation",
+        status=TaskStatus.COMPLETED.value,
+        payload_expires_at=now + timedelta(days=30),
+    ))
+    db_session.flush()
+    db_session.add(WorkTaskAttemptRecord(
+        attempt_id=attempt_id,
+        task_id=task_id,
+        attempt_number=1,
+        worker_id="sonnet",
+        lease_token=f"lt_{uuid4().hex[:12]}",
+        status=AttemptStatus.COMPLETED.value,
+    ))
+    db_session.commit()
+
+    with pytest.raises(Exception, match="New review metadata must start in PENDING"):
+        db_session.execute(
+            text(
+                "INSERT INTO public.workforce_task_reviews "
+                "(review_id, task_id, attempt_id, status, original_output_sha256, "
+                "adjudicated_by, adjudicated_at, review_expires_at) "
+                "VALUES (:rid, :tid, :aid, 'APPROVED', :hash, 'forged_operator', now(), now() + interval '1 day')"
+            ),
+            {"rid": review_id, "tid": task_id, "aid": attempt_id, "hash": "f" * 64},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+
 def test_db_initial_review_payload_insert_rejects_adjusted_output(db_session: Session):
     now = datetime.now(timezone.utc)
     task_id = f"task_{uuid4().hex[:12]}"
@@ -1171,8 +1215,11 @@ def test_migration_forward_rollback_forward_lifecycle():
     rb = (root / "migrations" / "2026_11_10_workforce_reviews_v1_rollback.sql").read_text(encoding="utf-8")
     mig_v2 = (root / "migrations" / "2026_11_10_workforce_review_payload_insert_guard_v2.sql").read_text(encoding="utf-8")
     rb_v2 = (root / "migrations" / "2026_11_10_workforce_review_payload_insert_guard_v2_rollback.sql").read_text(encoding="utf-8")
+    mig_v3 = (root / "migrations" / "2026_11_10_workforce_review_creation_boundary_v3.sql").read_text(encoding="utf-8")
+    rb_v3 = (root / "migrations" / "2026_11_10_workforce_review_creation_boundary_v3_rollback.sql").read_text(encoding="utf-8")
 
     with psycopg.connect(conn_url, autocommit=True) as conn:
+        conn.execute(rb_v3)
         conn.execute(rb_v2)
         conn.execute(rb)
         exists = conn.execute(
@@ -1182,11 +1229,30 @@ def test_migration_forward_rollback_forward_lifecycle():
 
         conn.execute(mig)
         conn.execute(mig_v2)
+        conn.execute(mig_v3)
+        metadata_trigger = conn.execute(
+            "SELECT pg_get_triggerdef(oid) FROM pg_trigger "
+            "WHERE tgname = 'trg_workforce_task_reviews_guard' AND NOT tgisinternal"
+        ).fetchone()
+        assert metadata_trigger is not None and "INSERT" in metadata_trigger[0].upper()
+        no_review_insert = conn.execute(
+            "SELECT has_table_privilege('sireader_workforce_cmd', 'public.workforce_task_reviews', 'INSERT'), "
+            "has_table_privilege('sireader_workforce_cmd', 'public.workforce_task_review_payloads', 'INSERT')"
+        ).fetchone()
+        assert no_review_insert == (False, False)
+        conn.execute(rb_v3)
+        insert_reopened = conn.execute(
+            "SELECT has_table_privilege('sireader_workforce_cmd', 'public.workforce_task_reviews', 'INSERT'), "
+            "has_table_privilege('sireader_workforce_cmd', 'public.workforce_task_review_payloads', 'INSERT')"
+        ).fetchone()
+        assert insert_reopened == (True, True)
+        conn.execute(mig_v3)
         trigger = conn.execute(
             "SELECT pg_get_triggerdef(oid) FROM pg_trigger "
             "WHERE tgname = 'trg_workforce_task_review_payloads_guard' AND NOT tgisinternal"
         ).fetchone()
         assert trigger is not None and "INSERT" in trigger[0].upper()
+        conn.execute(rb_v3)
         conn.execute(rb_v2)
         reverted = conn.execute(
             "SELECT pg_get_triggerdef(oid) FROM pg_trigger "
@@ -1194,6 +1260,7 @@ def test_migration_forward_rollback_forward_lifecycle():
         ).fetchone()
         assert reverted is not None and "INSERT" not in reverted[0].upper()
         conn.execute(mig_v2)
+        conn.execute(mig_v3)
         recreated = conn.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name = 'workforce_task_reviews'"
         ).fetchone()
