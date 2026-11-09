@@ -183,6 +183,13 @@ def test_workforce_migration_security_and_task_lifecycle():
                             db, worker_id="haiku", instance_id="missing-instance",
                             now=recovery_time + timedelta(minutes=1, seconds=2),
                         )
+                    heartbeat_worker(db, WorkerHeartbeatContract(
+                        worker_id="haiku", instance_id="instance-haiku-123",
+                        process_state=WorkerProcessState.READY, process_started_at=now,
+                        heartbeat_at=recovery_time + timedelta(minutes=1, seconds=1),
+                        active_task_count=0, in_flight_provider_requests=0,
+                        observed_at=recovery_time + timedelta(minutes=1, seconds=1),
+                    ))
                     pending = claim_next_task(
                         db, worker_id="haiku", instance_id="instance-haiku-123",
                         now=recovery_time + timedelta(minutes=1, seconds=2),
