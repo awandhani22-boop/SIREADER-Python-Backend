@@ -65,7 +65,8 @@ jobs:
             tests/api/test_workforce_runtime_postgres.py \
             tests/api/test_workforce_commands.py \
             tests/api/test_workforce_command_config.py \
-            tests/api/test_workforce_timeline.py
+            tests/api/test_workforce_timeline.py \
+            tests/workers/test_review_subsystem.py
 
       - name: Compile API package
         run: |

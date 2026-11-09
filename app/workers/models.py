@@ -203,7 +203,7 @@ class WorkforceTaskReviewRecord(Base):
             name="ck_workforce_task_reviews_status",
         ),
         CheckConstraint(
-            "original_output_sha256 ~ '^[0-9a-f]{64}$' AND (adjusted_output_sha256 IS NULL OR adjusted_output_sha256 ~ '^[0-9a-f]{64}$')",
+            "length(original_output_sha256) = 64 AND (adjusted_output_sha256 IS NULL OR length(adjusted_output_sha256) = 64)",
             name="ck_workforce_task_reviews_sha256_format",
         ),
         CheckConstraint(
