@@ -1,6 +1,6 @@
 """Authenticated, bounded PostgreSQL LISTEN/NOTIFY event stream support.
 
-The five snapshot endpoints remain authoritative. Notifications carry only
+The snapshot endpoints remain authoritative. Notifications carry only
 allowlisted resource keys and are used solely to invalidate browser snapshots.
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ from sqlalchemy.engine import make_url
 logger = logging.getLogger(__name__)
 
 CHANNEL = "sireader_observability_v1"
-RESOURCE_ORDER = ("system", "telemetry", "pipeline", "market_watches", "audit")
+RESOURCE_ORDER = ("system", "telemetry", "pipeline", "market_watches", "audit", "workforce")
 RESOURCE_KEYS = frozenset(RESOURCE_ORDER)
 RESET_REASONS = frozenset({
     "cursor_invalid",
