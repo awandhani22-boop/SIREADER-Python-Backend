@@ -732,6 +732,29 @@ def get_monthly_usage():
 # RESERVASI
 # ============================================================
 
+def _validate_task_cost_limit(currency, reserved, max_cost_rp=None, max_cost_usd=None):
+    """Fail closed when a caller-supplied per-task cap is missing or exceeded."""
+    if max_cost_rp is not None and max_cost_usd is not None:
+        raise ValueError("Only one per-task cost cap may be supplied.")
+    currency = str(currency).upper()
+    if currency == CURRENCY_IDR:
+        if max_cost_usd is not None:
+            raise ValueError("USD task cap cannot be used for an IDR model.")
+        limit = None if max_cost_rp is None else Decimal(str(max_cost_rp))
+    elif currency == CURRENCY_USD:
+        if max_cost_rp is not None:
+            raise ValueError("IDR task cap cannot be used for a USD model.")
+        limit = None if max_cost_usd is None else Decimal(str(max_cost_usd))
+    else:
+        raise ValueError(f"Unsupported billing currency: {currency}")
+    if limit is not None and limit < 0:
+        raise ValueError("Per-task cost cap cannot be negative.")
+    if limit is not None and Decimal(str(reserved)) > limit:
+        raise BudgetExceededError(
+            f"AI request blocked: reserved cost exceeds the per-task {currency} cap."
+        )
+
+
 def reserve_ai_request(
     tier,
     prompt_text,
@@ -740,6 +763,8 @@ def reserve_ai_request(
     request_id=None,
     model=None,
     analysis_log_id=None,
+    max_cost_rp=None,
+    max_cost_usd=None,
 ):
     """Reservasi atomik; currency ditentukan dari model/provider, bukan tier."""
     tier = tier.upper()
@@ -760,6 +785,8 @@ def reserve_ai_request(
             request_id=request_id,
             analysis_log_id=analysis_log_id,
             config=config,
+            max_cost_rp=max_cost_rp,
+            max_cost_usd=max_cost_usd,
         )
 
     return _reserve_idr(
@@ -771,6 +798,8 @@ def reserve_ai_request(
         request_id=request_id,
         analysis_log_id=analysis_log_id,
         config=config,
+        max_cost_rp=max_cost_rp,
+        max_cost_usd=max_cost_usd,
     )
 
 
@@ -783,6 +812,8 @@ def _reserve_idr(
     request_id,
     analysis_log_id,
     config,
+    max_cost_rp=None,
+    max_cost_usd=None,
 ):
     estimate = estimate_request_cost(
         tier=tier,
@@ -792,6 +823,7 @@ def _reserve_idr(
     )
     usage_date = current_usage_date()
     new_reserved = estimate["reserved_cost_rp"]
+    _validate_task_cost_limit(CURRENCY_IDR, new_reserved, max_cost_rp, max_cost_usd)
 
     with SessionLocal() as db:
         _lock_budget(db)
@@ -877,6 +909,8 @@ def _reserve_usd(
     request_id,
     analysis_log_id,
     config,
+    max_cost_rp=None,
+    max_cost_usd=None,
 ):
     output_limit = (
         max_output_tokens if max_output_tokens is not None else config["max_output"]
@@ -889,6 +923,7 @@ def _reserve_usd(
     _validate_tokens(extra_input_tokens=extra_input_tokens)
     usage_date = current_usage_date()
     new_reserved = estimate["reserved_cost_usd"]
+    _validate_task_cost_limit(CURRENCY_USD, new_reserved, max_cost_rp, max_cost_usd)
     budget = _money(settings.AI_ANTHROPIC_MONTHLY_BUDGET_USD)
 
     with SessionLocal() as db:
