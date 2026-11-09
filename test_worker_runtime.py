@@ -8,6 +8,7 @@ from app.config import settings
 from app.workers.provider import WorkerProviderError, WorkerProviderResult
 from app.workers import runtime
 from app.workers.runtime import run_worker_forever, run_worker_once
+from app.workers.registry import build_default_registry
 
 
 def test_worker_process_refuses_to_start_when_runtime_is_disabled(monkeypatch):
@@ -31,6 +32,7 @@ def test_worker_runtime_rejects_unsafe_poll_intervals(monkeypatch):
 
 def test_worker_publishes_active_and_provider_in_flight_heartbeats_without_waiting(monkeypatch):
     monkeypatch.setattr(settings, "WORKER_RUNTIME_ENABLED", True)
+    monkeypatch.setattr(settings, "WORKER_PROVIDER_MODE", "OMNIROUTE")
     monkeypatch.setattr(runtime, "_last_maintenance_at", datetime.now(timezone.utc))
 
     heartbeats = []
@@ -62,6 +64,7 @@ def test_worker_publishes_active_and_provider_in_flight_heartbeats_without_waiti
     task = SimpleNamespace(
         task_id="task-12345678",
         task_type="SUMMARIZATION",
+        required_capability="summarization",
         title="Test task",
         input_payload={"text": "fixture"},
         correlation_id="corr-12345678",
@@ -70,7 +73,7 @@ def test_worker_publishes_active_and_provider_in_flight_heartbeats_without_waiti
 
     monkeypatch.setattr(runtime, "SessionLocal", FakeSession)
     monkeypatch.setattr(runtime, "claim_next_task", lambda *_args, **_kwargs: (task, attempt))
-    monkeypatch.setattr(runtime, "_load_worker_contract", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(runtime, "_load_worker_contract", lambda *_args, **_kwargs: build_default_registry()["haiku"])
     monkeypatch.setattr(runtime, "create_worker_provider", lambda _worker: FakeOmniRouteProvider())
     monkeypatch.setattr(runtime, "start_task", lambda *_args, **_kwargs: events.append("task-started"))
     monkeypatch.setattr(runtime, "mark_provider_requested", lambda *_args, **_kwargs: events.append("provider-requested"))
