@@ -43,12 +43,19 @@ Reserved and UNKNOWN requests must continue to count toward projected usage unti
 
 Policy version: `2026.11.10`.
 
-- FAST, REASONING, and ESCALATION are assigned by backend capability policy before a provider request.
-- The attempt is not automatically replayed at a larger tier after an UNKNOWN provider outcome.
+- Policy version `2026.11.10` validates worker, required capability, and task-type compatibility before the provider boundary.
+- FAST capabilities: `quick_research`, `information_extraction`, `summarization`, `lightweight_classification`.
+- REASONING capabilities: `data_analysis`, `comparison`, `evaluation`, `structured_reasoning`.
+- ESCALATION capabilities: `complex_reasoning`, `strategic_analysis`, `deep_review`. `decision_evaluation` is explicitly barred from general-purpose LIVE provider routing because it is classified as trading-adjacent.
+- Worker tier ceilings are fixed: Haiku=FAST, Sonnet=REASONING, Opus=ESCALATION. The provider independently verifies that the request's explicit tier equals the worker ceiling; it never silently falls back to another tier.
+- Capability/task selection is the bounded escalation decision and happens before the single provider call. The current runtime does not perform quality-based multi-call escalation within one attempt.
+- The attempt is not automatically replayed at a larger tier after an UNKNOWN provider outcome. Reconcile the existing Cost Guard reservation first.
 - Credentials are redacted before provider boundary processing.
-- Personal-data indicators are redacted and cause the completed output to enter human review.
+- Pattern/key-based personal-data indicators (email, phone/mobile, passport, government/personal ID, date of birth, address, postal/ZIP code, SSN, tax ID, and name fields) are redacted and cause the completed output to enter human review. This is a deterministic guardrail, not a guarantee of complete PII detection or a substitute for an approved data-loss-prevention service.
 - Trading/execution capabilities and the decision_engineer/market_monitor roles are blocked from general-purpose LIVE provider routing.
 - An unrecognized capability/task mapping fails closed.
+- Private-key markers, explicit live trade/order instructions, execution-related payload keys, trading capability sets, and Decision Engineer / Market Monitor LIVE provider requests are rejected.
+- Mock-mode simulation can continue for excluded worker identities, but it never receives a provider model tier.
 
 ## Maintenance cycle
 
@@ -64,7 +71,9 @@ It does not construct a provider and does not execute tasks.
 
 ### Windows Task Scheduler
 
-Use `scripts/run_workforce_maintenance.ps1` as the program/script. Schedule it at a cadence suitable for the deployment, commonly every 5 minutes. The script prefers the project `.venv` interpreter and expects the configured database connection in the deployment environment or local `.env`.
+Use `scripts/run_workforce_maintenance.ps1` as the program/script. Register it in Windows Task Scheduler at a cadence suitable for the deployment, commonly every 5 minutes. The script prefers the project `.venv` interpreter and expects the configured database connection in the deployment environment or local `.env`.
+
+**Important:** the repository contains a one-shot command and wrapper only. It does not create or register a Windows scheduled task automatically. Verify the operator account, working directory, database environment, task history, and log output after the deployment owner registers it.
 
 Check the task's last result and application logs. The output contains aggregate counts only, not task payloads or secrets.
 
@@ -93,3 +102,12 @@ Do not run concurrently with a manually started database migration. The routine 
 - Budget hard limit: stop new provider reservations; do not modify the budget in order to bypass the guard.
 - Policy rejection: inspect the safe reason code and capability mapping; do not downgrade the worker policy.
 - Retention guard failure: stop purge and investigate schema/view/privilege health.
+
+
+## Verified implementation snapshot — 2026-11-10
+
+- Backend branch: `phase-5-implementation`.
+- Backend head at this snapshot: `1568435e092fc3b59bb271a9eef9d24981daa8e8`.
+- [CI run 42671067597 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42671067597): 187 API tests passed, 76 core regression tests passed, compile step successful.
+- [Budget observability CI run 42667794174 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42667794174): 177 API tests and 75 core regression tests passed.
+- These checks use disposable test infrastructure. They do not deploy migrations to Supabase LIVE, start a paid provider, or register an OS-level maintenance task.
