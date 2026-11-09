@@ -1,8 +1,6 @@
 """Deterministic worker/capability registry matching the existing Virtual Office roster."""
 from __future__ import annotations
 
-from types import MappingProxyType
-
 from app.workers.runtime_contract import CapabilityContract, WorkerContract
 
 
