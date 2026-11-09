@@ -13,6 +13,8 @@ from app.api.event_stream import (
     validate_trigger_inventory,
 )
 from app.api.server import create_app
+from app.api.routes import events as events_route
+from app.api.routes.events import generate_event_stream
 
 SECRET = "test-only-api-secret"
 
@@ -201,3 +203,33 @@ def test_event_route_requires_bearer_and_listener_readiness(monkeypatch):
             "/api/v1/events/stream",
             headers={"Authorization": f"Bearer {SECRET}"},
         ).status_code == 503
+
+
+
+def test_idle_event_stream_emits_heartbeat_comment_and_unsubscribes(monkeypatch):
+    monkeypatch.setattr(events_route, "HEARTBEAT_SECONDS", 0.001)
+
+    class DisconnectAfterHeartbeat:
+        def __init__(self):
+            self.checks = 0
+
+        async def is_disconnected(self):
+            self.checks += 1
+            return self.checks > 1
+
+    async def scenario():
+        hub = EventHub()
+        hub.set_listener_ready(True)
+        subscriber = hub.subscribe()
+        generator = generate_event_stream(DisconnectAfterHeartbeat(), hub, subscriber)
+
+        assert await generator.__anext__() == "retry: 3000\\n\\n"
+        assert await generator.__anext__() == ": ping\\n\\n"
+
+        with pytest.raises(StopAsyncIteration):
+            await generator.__anext__()
+
+        assert subscriber.closed is True
+        assert hub.subscriber_count == 0
+
+    run(scenario())
