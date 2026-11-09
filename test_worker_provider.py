@@ -104,3 +104,24 @@ def test_task_cost_guard_enforces_currency_and_reserved_estimate():
         _validate_task_cost_limit("IDR", Decimal("1.00"), max_cost_usd=Decimal("1.00"))
     with pytest.raises(ValueError, match="negative"):
         _validate_task_cost_limit("USD", Decimal("0.01"), max_cost_usd=Decimal("-1"))
+
+
+
+def test_pre_request_persistence_failure_is_known_and_safely_retryable(monkeypatch):
+    monkeypatch.setattr(settings, "AI_API_KEY", "test-only-placeholder")
+    monkeypatch.setattr(settings, "AI_BASE_URL", "http://127.0.0.1:20128/v1")
+    monkeypatch.setattr(settings, "WORKER_MAX_TASK_COST_RP", Decimal("3.00"))
+
+    def reject_persistence(**_kwargs):
+        raise omniroute_client.AIRequestError(
+            "pre-request persistence failed",
+            definitely_not_charged=True,
+        )
+
+    monkeypatch.setattr(omniroute_client, "call_ai", reject_persistence)
+    with pytest.raises(WorkerProviderError) as error:
+        OmniRouteWorkerProvider().execute(build_default_registry()["haiku"], _request())
+
+    assert error.value.code == "PROVIDER_STATE_PERSIST_FAILED"
+    assert error.value.retryable is True
+    assert error.value.outcome_unknown is False
