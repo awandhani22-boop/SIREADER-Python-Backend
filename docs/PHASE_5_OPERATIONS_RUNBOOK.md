@@ -71,11 +71,26 @@ It does not construct a provider and does not execute tasks.
 
 ### Windows Task Scheduler
 
-Use `scripts/run_workforce_maintenance.ps1` as the program/script. Register it in Windows Task Scheduler at a cadence suitable for the deployment, commonly every 5 minutes. The script prefers the project `.venv` interpreter and expects the configured database connection in the deployment environment or local `.env`.
+The repository includes a one-shot runner and a registration script:
 
-**Important:** the repository contains a one-shot command and wrapper only. It does not create or register a Windows scheduled task automatically. Verify the operator account, working directory, database environment, task history, and log output after the deployment owner registers it.
+- `scripts/run_workforce_maintenance.ps1` runs one maintenance transaction.
+- `scripts/register_workforce_maintenance.ps1` registers/removes the Windows scheduled task.
 
-Check the task's last result and application logs. The output contains aggregate counts only, not task payloads or secrets.
+From an elevated or ordinary PowerShell session under the intended Windows user, run:
+
+```powershell
+.\scripts\register_workforce_maintenance.ps1
+```
+
+It registers `SIREADER-WorkforceMaintenance` every 5 minutes using the current interactive account (`/IT`); no Windows password is stored. Add `-RunNow` to start one cycle after registration. Remove it with:
+
+```powershell
+.\scripts\register_workforce_maintenance.ps1 -Remove
+```
+
+The registration script requires the backend `.env` file and a configured local database connection. Verify the task's last result and application logs after registration. It does not enable the workforce worker runtime or any provider.
+
+**Important:** these scripts are committed but cannot register a task on the owner's Windows machine from GitHub CI. The deployment owner must run the registration command locally.
 
 ### One-shot manual execution
 
