@@ -93,6 +93,57 @@ def test_workforce_migration_security_and_task_lifecycle():
                         observed_at=now,
                     ))
 
+            # A logical worker may run several process instances. The API view
+            # must aggregate only fresh instance counters and keep READY if any
+            # fresh instance is READY, rather than exposing just the latest row.
+            multi_instance_at = now + timedelta(seconds=1)
+            with Session() as db:
+                with db.begin():
+                    heartbeat_worker(db, WorkerHeartbeatContract(
+                        worker_id="haiku", instance_id="instance-haiku-123",
+                        process_state=WorkerProcessState.READY, process_started_at=now,
+                        heartbeat_at=multi_instance_at, active_task_count=2,
+                        in_flight_provider_requests=1, observed_at=multi_instance_at,
+                    ))
+                    heartbeat_worker(db, WorkerHeartbeatContract(
+                        worker_id="haiku", instance_id="instance-haiku-secondary",
+                        process_state=WorkerProcessState.READY, process_started_at=now,
+                        heartbeat_at=multi_instance_at, active_task_count=3,
+                        in_flight_provider_requests=2, observed_at=multi_instance_at,
+                    ))
+                    heartbeat_worker(db, WorkerHeartbeatContract(
+                        worker_id="haiku", instance_id="instance-haiku-stale",
+                        process_state=WorkerProcessState.READY, process_started_at=now - timedelta(minutes=2),
+                        heartbeat_at=now - timedelta(minutes=2), active_task_count=9,
+                        in_flight_provider_requests=9, observed_at=now - timedelta(minutes=2),
+                    ))
+
+            with psycopg.connect(PSYCOPG_URL, autocommit=True) as api:
+                api.execute("SET ROLE sireader_api_ro")
+                workforce_worker = api.execute(
+                    "SELECT process_status, active_task_count, in_flight_provider_requests "
+                    "FROM public.v_api_workforce_workers WHERE worker_id = 'haiku'"
+                ).fetchone()
+                assert workforce_worker == ("READY", 5, 3)
+
+            # Clear the fixture's counters and leave both fresh instances with
+            # their real process states before exercising task dispatch below.
+            reset_at = now + timedelta(seconds=2)
+            with Session() as db:
+                with db.begin():
+                    heartbeat_worker(db, WorkerHeartbeatContract(
+                        worker_id="haiku", instance_id="instance-haiku-123",
+                        process_state=WorkerProcessState.READY, process_started_at=now,
+                        heartbeat_at=reset_at, active_task_count=0,
+                        in_flight_provider_requests=0, observed_at=reset_at,
+                    ))
+                    heartbeat_worker(db, WorkerHeartbeatContract(
+                        worker_id="haiku", instance_id="instance-haiku-secondary",
+                        process_state=WorkerProcessState.STOPPED, process_started_at=now,
+                        heartbeat_at=reset_at, active_task_count=0,
+                        in_flight_provider_requests=0, observed_at=reset_at,
+                    ))
+
             task_ids = []
             with Session() as db:
                 with db.begin():
