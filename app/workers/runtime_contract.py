@@ -201,7 +201,7 @@ class ActivityEventContract(ContractModel):
 
 TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.QUEUED: frozenset({TaskStatus.CLAIMED, TaskStatus.CANCELLED, TaskStatus.DEAD_LETTERED}),
-    TaskStatus.CLAIMED: frozenset({TaskStatus.RUNNING, TaskStatus.QUEUED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.WAITING_REVIEW}),
+    TaskStatus.CLAIMED: frozenset({TaskStatus.RUNNING, TaskStatus.QUEUED, TaskStatus.RETRY_WAIT, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.WAITING_REVIEW, TaskStatus.DEAD_LETTERED}),
     TaskStatus.RUNNING: frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.RETRY_WAIT, TaskStatus.CANCELLED, TaskStatus.WAITING_REVIEW, TaskStatus.DEAD_LETTERED}),
     TaskStatus.RETRY_WAIT: frozenset({TaskStatus.QUEUED, TaskStatus.CANCELLED, TaskStatus.DEAD_LETTERED}),
     TaskStatus.WAITING_REVIEW: frozenset({TaskStatus.QUEUED, TaskStatus.FAILED, TaskStatus.CANCELLED}),
