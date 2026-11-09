@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
