@@ -140,6 +140,30 @@ class OmniRouteWorkerProvider:
                     retryable=True,
                 ) from exc
             raise WorkerProviderError("PROVIDER_OUTCOME_UNKNOWN", "Provider call failed; reconcile its usage reservation before retrying.", outcome_unknown=True) from exc
+        raw_usage = result.get("usage")
+        usage: dict[str, int] | None = None
+        if isinstance(raw_usage, dict):
+            try:
+                parsed_usage = {
+                    key: raw_usage[key]
+                    for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+                }
+                if any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in parsed_usage.values()
+                ):
+                    raise ValueError("invalid token usage")
+                usage = parsed_usage
+            except (KeyError, TypeError, ValueError):
+                usage = None
+        if usage is None:
+            # The provider may already have completed and charged this request.
+            # Never silently report zero usage or send it through another model.
+            raise WorkerProviderError(
+                "PROVIDER_USAGE_UNAVAILABLE",
+                "Provider completed without a valid token-usage record; reconcile before retrying.",
+                outcome_unknown=True,
+            )
         return WorkerProviderResult(
             result_payload={
                 "content": result["content"],
@@ -150,12 +174,7 @@ class OmniRouteWorkerProvider:
             provider_request_id=result["request_id"],
             billing_currency=result["billing_currency"],
             cost_amount=str(result["cost"]),
-            usage={
-                "input_tokens": int(result["usage"]["input_tokens"]),
-                "output_tokens": int(result["usage"]["output_tokens"]),
-                "cache_read_tokens": int(result["usage"]["cache_read_tokens"]),
-                "cache_write_tokens": int(result["usage"]["cache_write_tokens"]),
-            },
+            usage=usage,
         )
 
 
