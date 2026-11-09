@@ -14,12 +14,16 @@ from app.workers.repository import (
     cancel_task, claim_next_task, complete_task, enqueue_task, expire_deadline_tasks,
     heartbeat_worker, mark_provider_requested, recover_expired_leases,
     start_task, sync_default_registry, purge_expired_task_payloads,
+    expire_stale_reviews, purge_expired_review_payloads,
 )
 from app.workers.runtime_contract import (
     ActivityEventType, AttemptStatus, TaskStatus, WorkerHeartbeatContract,
     WorkerProcessState,
 )
-from app.workers.models import WorkActivityEventRecord, WorkTaskAttemptRecord, WorkTaskRecord
+from app.workers.models import (
+    WorkActivityEventRecord, WorkTaskAttemptRecord, WorkTaskRecord,
+    WorkforceTaskReviewPayloadRecord, WorkforceTaskReviewRecord,
+)
 from app.workers.repository import WorkerUnavailableError
 
 POSTGRES_URL = os.getenv("SIREADER_TEST_POSTGRES_URL")
@@ -341,7 +345,12 @@ def test_workforce_migration_security_and_task_lifecycle():
                     review = db.get(WorkTaskRecord, provider_task_id)
                     assert completed.payload_expires_at == completed_at + timedelta(days=30)
                     assert review.payload_expires_at == recovery_time + timedelta(days=90)
-                    assert purge_expired_task_payloads(db, now=recovery_time + timedelta(days=31)) == 3
+                    retention_time = recovery_time + timedelta(days=31)
+                    # A completed task whose output was sampled for human review
+                    # stays protected while its review is PENDING. Expire it first.
+                    assert expire_stale_reviews(db, now=retention_time) == 1
+                    assert purge_expired_task_payloads(db, now=retention_time) == 3
+                    assert purge_expired_review_payloads(db, now=retention_time) == 1
 
             with Session() as db:
                 completed = db.get(WorkTaskRecord, pre_task_id)
@@ -351,6 +360,11 @@ def test_workforce_migration_security_and_task_lifecycle():
                 assert completed.input_payload == {}
                 assert completed.result_payload is None
                 assert completed.payload_purged_at is not None
+                human_review = db.query(WorkforceTaskReviewRecord).filter_by(task_id=pre_task_id).one()
+                assert human_review.status == "EXPIRED"
+                human_review_payload = db.get(WorkforceTaskReviewPayloadRecord, human_review.review_id)
+                assert human_review_payload.payload_purged_at is not None
+                assert human_review_payload.original_output is None
                 assert deadline.payload_purged_at is not None
                 assert cancelled.payload_purged_at is not None
                 assert review.input_payload == {"text": "safe test"}
