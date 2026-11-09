@@ -5,6 +5,7 @@ It never connects to Supabase or to the user's production database.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -332,6 +333,15 @@ def postgres_security_engine():
         for statement in VIEW_DDL:
             connection.exec_driver_sql(statement)
 
+        # Extend the same disposable security fixture with the Phase 4 workforce
+        # schema and its five allowlisted views before auditing all eleven views.
+        migration_root = Path(__file__).resolve().parents[2] / "migrations"
+        for migration_name in (
+            "2026_11_09_workforce_runtime_v1.sql",
+            "2026_11_09_workforce_api_views_v1.sql",
+        ):
+            connection.exec_driver_sql((migration_root / migration_name).read_text())
+
         for view_name in VIEW_NAMES:
             connection.exec_driver_sql(
                 f"ALTER VIEW public.{view_name} OWNER TO sireader_view_owner"
@@ -379,7 +389,13 @@ def test_postgres_effective_role_and_privilege_boundary(postgres_security_engine
             rows = connection.execute(
                 text(f"SELECT * FROM public.{view_name} LIMIT 2")
             ).mappings().all()
-            assert len(rows) == 1, f"{view_name} did not return the permitted RLS row"
+            expected_rows = {
+                "v_api_workforce_workers": 7,
+                "v_api_workforce_tasks": 0,
+                "v_api_workforce_attempts": 0,
+                "v_api_workforce_activity": 0,
+            }.get(view_name, 1)
+            assert len(rows) == expected_rows, f"{view_name} returned an unexpected row count"
 
         assert connection.execute(
             text("SELECT trading_mode FROM public.v_api_system_runtime_state")
@@ -399,6 +415,13 @@ def test_postgres_effective_role_and_privilege_boundary(postgres_security_engine
         "ai_pending_messages",
         "trade_decision_watches",
         "approval_decisions",
+        "workforce_workers",
+        "workforce_capabilities",
+        "workforce_worker_capabilities",
+        "workforce_heartbeats",
+        "workforce_tasks",
+        "workforce_task_attempts",
+        "workforce_activity_events",
     ],
 )
 def test_postgres_api_role_cannot_select_any_base_table(postgres_security_engine, table_name):
