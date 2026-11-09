@@ -34,7 +34,7 @@ def _run_migration(admin, root: Path, name: str):
 
 def test_workforce_migration_security_and_task_lifecycle():
     psycopg = pytest.importorskip("psycopg")
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     engine = create_engine(POSTGRES_URL, pool_pre_ping=True)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     migration_name = "2026_11_09_workforce_runtime_v1.sql"
