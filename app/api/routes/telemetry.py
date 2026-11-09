@@ -142,9 +142,9 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
         if row["billing_currency"] == "IDR":
             daily_totals["actual"] += amount(row, "IDR", "cost")
             daily_totals["reserved"] += amount(row, "IDR", "reserved")
-        elif row["billing_currency"] not in {"USD", "IDR"}:
-            _checked_currency(row["billing_currency"])
             daily_status[str(row["status"])] = daily_status.get(str(row["status"]), 0) + int(row["requests"])
+        elif row["billing_currency"] != "USD":
+            _checked_currency(row["billing_currency"])
 
     month_totals: dict[str, dict[str, Any]] = {
         currency: {"actual": Decimal("0"), "reserved": Decimal("0"), "statuses": {}, "tiers": {}}
