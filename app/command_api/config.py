@@ -8,6 +8,7 @@ from sqlalchemy.engine import make_url
 class WorkforceCommandSettings(BaseSettings):
     SIREADER_WORKFORCE_COMMAND_DATABASE_URL: str | None = Field(default=None)
     SIREADER_WORKFORCE_COMMAND_AUTH_TOKEN: str | None = Field(default=None)
+    SIREADER_API_AUTH_TOKEN: str | None = Field(default=None, exclude=True, repr=False)
     WORKFORCE_COMMAND_HOST: str = Field(default="127.0.0.1")
     WORKFORCE_COMMAND_PORT: int = Field(default=8010)
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8-sig", extra="ignore")
@@ -36,7 +37,7 @@ class WorkforceCommandSettings(BaseSettings):
             raise RuntimeError("SIREADER_WORKFORCE_COMMAND_AUTH_TOKEN must contain 32..256 characters.")
         if not re.fullmatch(r"[A-Za-z0-9._~+/-]{32,256}", token):
             raise RuntimeError("Workforce command token must use 32..256 ASCII URL-safe characters.")
-        read_only_token = os.getenv("SIREADER_API_AUTH_TOKEN", "").strip()
+        read_only_token = (self.SIREADER_API_AUTH_TOKEN or os.getenv("SIREADER_API_AUTH_TOKEN", "")).strip()
         if read_only_token and token == read_only_token:
             raise RuntimeError("Workforce command token must be distinct from the read-only API token.")
         return token

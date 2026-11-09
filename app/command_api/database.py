@@ -85,15 +85,26 @@ def validate_command_database_security(session: Session) -> None:
           has_table_privilege(current_user, c.oid, 'TRIGGER') AS can_trigger
         FROM pg_catalog.pg_class c
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','f','S')
+        WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','f')
     """)).mappings().all()
+
+    sequence_access = session.execute(text("""
+        SELECT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_class c
+          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public' AND c.relkind = 'S'
+            AND (
+              has_sequence_privilege(current_user, c.oid, 'USAGE')
+              OR has_sequence_privilege(current_user, c.oid, 'SELECT')
+              OR has_sequence_privilege(current_user, c.oid, 'UPDATE')
+            )
+        )
+    """)).scalar_one()
+    if sequence_access:
+        raise RuntimeError("Workforce command role must not access public sequences.")
 
     for relation in relations:
         name = relation["relname"]
-        if relation["relkind"] == "S":
-            if any(relation[key] for key in ("can_select", "can_insert", "can_update", "can_delete", "can_truncate", "can_reference", "can_trigger")):
-                raise RuntimeError("Workforce command role must not access public sequences.")
-            continue
         actual = {
             privilege for privilege, key in (
                 ("SELECT", "can_select"), ("INSERT", "can_insert"),
@@ -132,6 +143,10 @@ def validate_command_database_security(session: Session) -> None:
             continue
         # Table-wide SELECT/INSERT are expected on a subset of tables. UPDATE
         # is deliberately column-scoped; all other column UPDATEs are rejected.
+        if column["can_select"] and "SELECT" not in EXPECTED_TABLE_PRIVILEGES[name]:
+            raise RuntimeError("Workforce command role has an unapproved column-level SELECT grant.")
+        if column["can_insert"] and "INSERT" not in EXPECTED_TABLE_PRIVILEGES[name]:
+            raise RuntimeError("Workforce command role has an unapproved column-level INSERT grant.")
         if column["can_update"] and column["attname"] not in EXPECTED_COLUMN_UPDATES.get(name, set()):
             raise RuntimeError("Workforce command role can update an unapproved workforce column.")
         if column["can_reference"]:

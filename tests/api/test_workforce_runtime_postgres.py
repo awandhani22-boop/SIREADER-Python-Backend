@@ -42,17 +42,21 @@ def test_workforce_migration_security_and_task_lifecycle():
     migration_name = "2026_11_09_workforce_runtime_v1.sql"
     rollback_name = "2026_11_09_workforce_runtime_v1_rollback.sql"
     views_migration_name = "2026_11_09_workforce_api_views_v1.sql"
+    command_migration_name = "2026_11_09_workforce_commands_v1.sql"
+    command_rollback_name = "2026_11_09_workforce_commands_v1_rollback.sql"
     views_rollback_name = "2026_11_09_workforce_api_views_v1_rollback.sql"
 
     with psycopg.connect(PSYCOPG_URL, autocommit=True) as admin:
-        roles = {row[0] for row in admin.execute("SELECT rolname FROM pg_roles WHERE rolname IN ('sireader_view_owner', 'sireader_api_ro')")}
-        if roles != {"sireader_view_owner", "sireader_api_ro"}:
+        roles = {row[0] for row in admin.execute("SELECT rolname FROM pg_roles WHERE rolname IN ('sireader_view_owner', 'sireader_api_ro', 'sireader_workforce_cmd')")}
+        if roles != {"sireader_view_owner", "sireader_api_ro", "sireader_workforce_cmd"}:
             pytest.skip("Run after the disposable PostgreSQL privilege fixture creates the approved roles.")
         try:
             _run_migration(admin, root, migration_name)
             _run_migration(admin, root, migration_name)  # idempotency
             _run_migration(admin, root, views_migration_name)
             _run_migration(admin, root, views_migration_name)  # idempotent view replacement
+            _run_migration(admin, root, command_migration_name)
+            _run_migration(admin, root, command_migration_name)  # idempotent command boundary
             counts = admin.execute(
                 """
                 SELECT
@@ -341,6 +345,7 @@ def test_workforce_migration_security_and_task_lifecycle():
                 assert [item.payload for item in notices] == ["workforce"]
 
         finally:
+            _run_migration(admin, root, command_rollback_name)
             _run_migration(admin, root, views_rollback_name)
             _run_migration(admin, root, rollback_name)
     engine.dispose()
