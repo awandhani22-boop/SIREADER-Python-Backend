@@ -1,4 +1,4 @@
-"""PostgreSQL integration test for the six-view security boundary.
+"""PostgreSQL integration test for the eleven-view security boundary.
 
 This test runs only against an explicitly supplied disposable CI database.
 It never connects to Supabase or to the user's production database.
@@ -321,6 +321,13 @@ def postgres_security_engine():
             "ai_pending_messages", "trade_decision_watches", "approval_decisions",
         ):
             connection.exec_driver_sql(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
+        for table_name in (
+            "workforce_activity_events", "workforce_task_attempts", "workforce_tasks",
+            "workforce_heartbeats", "workforce_worker_capabilities",
+            "workforce_capabilities", "workforce_workers",
+        ):
+            connection.exec_driver_sql(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
+        connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_notify_workforce_v1()")
         connection.exec_driver_sql("DROP ROLE IF EXISTS sireader_api_ro")
         connection.exec_driver_sql("DROP ROLE IF EXISTS sireader_view_owner")
 
