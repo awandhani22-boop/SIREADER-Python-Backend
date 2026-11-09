@@ -164,8 +164,8 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
 
     daily_idr = _budget_window(
         currency="IDR", window="DAILY", start=today, end=today,
-        budget=Decimal(str(settings.AI_TARGET_DAILY_BUDGET_RP)),
-        hard_limit=Decimal(str(settings.AI_HARD_DAILY_LIMIT_RP)),
+        budget=Decimal(str(api_settings.AI_TARGET_DAILY_BUDGET_RP)),
+        hard_limit=Decimal(str(api_settings.AI_HARD_DAILY_LIMIT_RP)),
         actual=daily_totals["actual"], reserved=daily_totals["reserved"],
         status_counts=daily_status,
     )
@@ -173,11 +173,11 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
     usd_month = month_totals["USD"]
     rolling_idr = _budget_window(
         currency="IDR", window="ROLLING_MONTH", start=month_start, end=today,
-        budget=Decimal(str(settings.AI_MONTHLY_BUDGET_RP)),
+        budget=Decimal(str(api_settings.AI_MONTHLY_BUDGET_RP)),
         actual=idr_month["actual"], reserved=idr_month["reserved"],
         status_counts=idr_month["statuses"],
     )
-    usd_budget = Decimal(str(settings.AI_ANTHROPIC_MONTHLY_BUDGET_USD))
+    usd_budget = Decimal(str(api_settings.AI_ANTHROPIC_MONTHLY_BUDGET_USD))
     monthly_usd = _budget_window(
         currency="USD", window="MONTHLY", start=month_start, end=today,
         budget=usd_budget,
@@ -186,9 +186,9 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
     )
 
     tier_budgets = {
-        "FAST": Decimal(str(settings.AI_FAST_MONTHLY_BUDGET_RP)),
-        "REASONING": Decimal(str(settings.AI_REASONING_MONTHLY_BUDGET_RP)),
-        "ESCALATION": Decimal(str(settings.AI_ESCALATION_MONTHLY_BUDGET_RP)),
+        "FAST": Decimal(str(api_settings.AI_FAST_MONTHLY_BUDGET_RP)),
+        "REASONING": Decimal(str(api_settings.AI_REASONING_MONTHLY_BUDGET_RP)),
+        "ESCALATION": Decimal(str(api_settings.AI_ESCALATION_MONTHLY_BUDGET_RP)),
     }
     idr_tiers = []
     for tier, budget in tier_budgets.items():

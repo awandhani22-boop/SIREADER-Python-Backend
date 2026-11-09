@@ -216,7 +216,7 @@ def test_telemetry_separates_currencies_for_totals_reservations_and_models(api_c
 
 def test_telemetry_budget_observability_preserves_currency_and_links_workforce_costs(api_client):
     client, sessions = api_client
-    from app.config import settings
+    from app.api.config import api_settings as settings
 
     from zoneinfo import ZoneInfo
     today = datetime.now(ZoneInfo("Asia/Jakarta")).date()
