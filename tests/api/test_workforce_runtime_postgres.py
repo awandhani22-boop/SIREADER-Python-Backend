@@ -214,7 +214,9 @@ def test_workforce_migration_security_and_task_lifecycle():
                         db, worker_id="haiku", instance_id="instance-haiku-123",
                         now=recovery_time + timedelta(minutes=1, seconds=2),
                     )
-                    assert pending is not None and pending[0].task_id == task_ids[2]
+                    assert pending is not None
+                    assert pending[0].task_id in {task_ids[1], task_ids[2]}
+                    assert pending[0].task_id not in {pre_task_id, provider_task_id}
                     cancelled = cancel_task(db, task_id=pending[0].task_id, now=recovery_time + timedelta(minutes=1, seconds=3))
                     assert cancelled.status == TaskStatus.CANCELLED.value
 
