@@ -209,7 +209,7 @@ def enqueue_task(db: Session, *, task_type: str, title: str, required_capability
     return row, True
 
 
-def _require_fresh_worker_heartbeat(db: Session, worker_id: str, instance_id: str, now: datetime) -> None:
+def _require_fresh_worker_heartbeat(db: Session, worker_id: str, instance_id: str, now: datetime, timeout_seconds: int = HEARTBEAT_TIMEOUT_SECONDS) -> None:
     heartbeat = db.scalar(
         select(WorkerHeartbeatRecord).where(
             WorkerHeartbeatRecord.worker_id == worker_id,
@@ -218,12 +218,12 @@ def _require_fresh_worker_heartbeat(db: Session, worker_id: str, instance_id: st
     )
     if heartbeat is None or heartbeat.process_state != WorkerProcessState.READY.value:
         raise WorkerUnavailableError("worker process has no READY heartbeat")
-    if _now(heartbeat.heartbeat_at) < now - timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS):
+    if _now(heartbeat.heartbeat_at) < now - timedelta(seconds=max(1, int(timeout_seconds))):
         raise WorkerUnavailableError("worker heartbeat is stale")
 
 
 def claim_next_task(db: Session, *, worker_id: str, instance_id: str,
-                    lease_seconds: int = 45, now: datetime | None = None) -> tuple[WorkTaskRecord, WorkTaskAttemptRecord] | None:
+                    lease_seconds: int = 45, heartbeat_timeout_seconds: int = HEARTBEAT_TIMEOUT_SECONDS,\n                    now: datetime | None = None) -> tuple[WorkTaskRecord, WorkTaskAttemptRecord] | None:
     """Atomically claim the highest effective-priority compatible task for one worker."""
     if not 5 <= int(lease_seconds) <= MAX_LEASE_SECONDS:
         raise ValueError("lease_seconds must be between 5 and 600")
@@ -231,7 +231,7 @@ def claim_next_task(db: Session, *, worker_id: str, instance_id: str,
     worker = db.scalar(select(WorkerDefinitionRecord).where(WorkerDefinitionRecord.worker_id == worker_id).with_for_update())
     if worker is None or not worker.enabled:
         raise WorkerUnavailableError("worker is not registered or is disabled")
-    _require_fresh_worker_heartbeat(db, worker_id, instance_id, stamp)
+    _require_fresh_worker_heartbeat(db, worker_id, instance_id, stamp, heartbeat_timeout_seconds)
     links = db.execute(
         select(WorkerCapabilityAssignmentRecord.capability_id).where(
             WorkerCapabilityAssignmentRecord.worker_id == worker_id,
