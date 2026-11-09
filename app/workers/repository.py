@@ -694,16 +694,26 @@ def purge_expired_task_payloads(
         TaskStatus.CANCELLED.value,
         TaskStatus.DEAD_LETTERED.value,
     ]
-    pending_review_tasks = select(WorkforceTaskReviewRecord.task_id).where(
-        WorkforceTaskReviewRecord.status == ReviewStatus.PENDING.value
-    )
+    filters = [
+        WorkTaskRecord.status.in_(purgeable_statuses),
+        WorkTaskRecord.payload_expires_at.is_not(None),
+        WorkTaskRecord.payload_expires_at <= stamp,
+        WorkTaskRecord.payload_purged_at.is_(None),
+    ]
+    try:
+        from sqlalchemy import inspect
+        bind = db.get_bind()
+        if inspect(bind).has_table("workforce_task_reviews"):
+            pending_review_tasks = select(WorkforceTaskReviewRecord.task_id).where(
+                WorkforceTaskReviewRecord.status == ReviewStatus.PENDING.value
+            )
+            filters.append(WorkTaskRecord.task_id.not_in(pending_review_tasks))
+    except Exception:
+        pass
+
     rows = db.execute(
         select(WorkTaskRecord).where(
-            WorkTaskRecord.status.in_(purgeable_statuses),
-            WorkTaskRecord.payload_expires_at.is_not(None),
-            WorkTaskRecord.payload_expires_at <= stamp,
-            WorkTaskRecord.payload_purged_at.is_(None),
-            WorkTaskRecord.task_id.not_in(pending_review_tasks),
+            *filters
         ).order_by(
             WorkTaskRecord.payload_expires_at.asc(),
             WorkTaskRecord.task_id.asc(),
