@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 
 class AIRequestError(Exception):
-    pass
+    def __init__(self, message: str, *, definitely_not_charged: bool = False):
+        super().__init__(message)
+        self.definitely_not_charged = definitely_not_charged
 
 
 class AIUsageMissingError(AIRequestError):
@@ -296,8 +298,27 @@ def call_ai(
 
     # Optional worker-runtime hook persists the attempt/request correlation after
     # a successful budget reservation and immediately before any network I/O.
+    # If persistence fails, no provider request has been sent: release the
+    # reservation as definitely-not-charged instead of leaving it RESERVED.
     if on_reserved is not None:
-        on_reserved(request_id)
+        try:
+            on_reserved(request_id)
+        except Exception as error:
+            try:
+                mark_ai_request_failed(
+                    request_id,
+                    f"Worker request-state persistence failed: {type(error).__name__}",
+                    definitely_not_charged=True,
+                )
+            except Exception:
+                logger.exception(
+                    "WORKER_PROVIDER_PRE_REQUEST_RESERVATION_RELEASE_FAILED request_id=%s",
+                    request_id,
+                )
+            raise AIRequestError(
+                "Provider request was not sent because worker request state could not be persisted.",
+                definitely_not_charged=True,
+            ) from error
 
     try:
         with urlopen(
