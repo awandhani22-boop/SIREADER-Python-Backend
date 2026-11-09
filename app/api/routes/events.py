@@ -1,17 +1,43 @@
 """Authenticated read-only SSE endpoint for resource invalidations."""
 import asyncio
+from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.event_stream import (
     EventHub,
     EventStreamUnavailable,
     SubscriberLimitReached,
+    StreamSubscriber,
 )
 
 router = APIRouter(tags=["events"])
 HEARTBEAT_SECONDS = 15.0
+
+
+async def generate_event_stream(
+    request: Request,
+    hub: EventHub,
+    subscriber: StreamSubscriber,
+) -> AsyncIterator[str]:
+    """Yield the retry directive, event frames, and idle heartbeat comments."""
+    try:
+        yield "retry: 3000\\n\\n"
+        while not await request.is_disconnected():
+            message = await subscriber.next_message(HEARTBEAT_SECONDS)
+            if message is None:
+                if subscriber.closed:
+                    break
+                yield ": ping\\n\\n"
+                continue
+            yield message.encode()
+            if message.event == "stream.reset":
+                break
+    except asyncio.CancelledError:
+        raise
+    finally:
+        hub.unsubscribe(subscriber)
 
 
 @router.get("/api/v1/events/stream")
@@ -39,26 +65,8 @@ async def stream_observability_events(request: Request):
             headers={"Cache-Control": "no-store", "Retry-After": "3"},
         )
 
-    async def generate():
-        try:
-            yield "retry: 3000\n\n"
-            while not await request.is_disconnected():
-                message = await subscriber.next_message(HEARTBEAT_SECONDS)
-                if message is None:
-                    if subscriber.closed:
-                        break
-                    yield ": ping\n\n"
-                    continue
-                yield message.encode()
-                if message.event == "stream.reset":
-                    break
-        except asyncio.CancelledError:
-            raise
-        finally:
-            hub.unsubscribe(subscriber)
-
     return StreamingResponse(
-        generate(),
+        generate_event_stream(request, hub, subscriber),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
