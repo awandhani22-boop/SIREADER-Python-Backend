@@ -70,6 +70,12 @@ def test_workforce_migration_security_and_task_lifecycle():
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     api.execute("INSERT INTO public.workforce_tasks (task_id,idempotency_key,correlation_id,task_type,title,required_capability) VALUES ('x','blocked-key','blocked-corr','SUMMARIZATION','Blocked','summarization')")
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_workers").fetchone()[0] == 7
+                haiku_capabilities = api.execute(
+                    "SELECT capability_ids FROM public.v_api_workforce_workers WHERE worker_id = 'haiku'"
+                ).fetchone()[0]
+                assert set(haiku_capabilities) == {
+                    "quick_research", "information_extraction", "summarization", "lightweight_classification"
+                }
                 runtime_view = api.execute("SELECT configured_workers, ready_workers FROM public.v_api_workforce_runtime").fetchone()
                 assert runtime_view == (7, 0)
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_tasks").fetchone()[0] == 0
