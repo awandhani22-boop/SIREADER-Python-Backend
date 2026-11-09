@@ -131,8 +131,8 @@ class WorkTaskAttemptRecord(Base):
 class WorkActivityEventRecord(Base):
     __tablename__ = "workforce_activity_events"
     __table_args__ = (
-        Index("ix_workforce_activity_created", "created_at"),
-        Index("ix_workforce_activity_task_created", "task_id", "created_at"),
+        Index("ix_workforce_activity_created", "occurred_at"),
+        Index("ix_workforce_activity_task_created", "task_id", "occurred_at"),
     )
     event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(40), nullable=False)
