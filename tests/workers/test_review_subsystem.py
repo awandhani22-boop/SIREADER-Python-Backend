@@ -30,7 +30,8 @@ from app.governance.review_policy import (
     evaluate_review_eligibility,
 )
 from app.workers.policy import (
-    POLICY_VERSION, SensitiveTaskAction, evaluate_workforce_policy,
+    POLICY_VERSION as WORKFORCE_POLICY_VERSION,
+    SensitiveTaskAction, evaluate_workforce_policy,
 )
 from app.workers.models import (
     ActorType,
@@ -1115,7 +1116,7 @@ def test_workforce_policy_routes_model_tier_from_capability_and_worker():
         )
         assert result.action is SensitiveTaskAction.ALLOW
         assert result.model_tier == expected_tier
-        assert result.policy_version == POLICY_VERSION
+        assert result.policy_version == WORKFORCE_POLICY_VERSION
         assert result.requires_human_review is False
 
 
