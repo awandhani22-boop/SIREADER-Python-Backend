@@ -59,7 +59,8 @@ jobs:
             tests/api/test_endpoints.py \
             tests/api/test_postgres_privileges.py \
             tests/api/test_event_stream.py \
-            tests/api/test_event_migration_postgres.py
+            tests/api/test_event_migration_postgres.py \
+            tests/api/test_workforce_runtime_postgres.py
 
       - name: Compile API package
         run: |
