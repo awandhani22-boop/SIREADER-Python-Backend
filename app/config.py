@@ -110,6 +110,17 @@ class Settings(BaseSettings):
     AI_PIPELINE_ENABLED: bool = False
     AI_DEBOUNCE_SECONDS: float = 5.0
 
+    # GENERIC WORKER RUNTIME — fail-closed defaults (Phase 4)
+    WORKER_RUNTIME_ENABLED: bool = False
+    WORKER_PROVIDER_MODE: str = "MOCK"
+    WORKER_LIVE_PROVIDER_ENABLED: bool = False
+    WORKER_MAX_TASK_COST_RP: Decimal = Decimal("0")
+    WORKER_MAX_TASK_COST_USD: Decimal = Decimal("0")
+    WORKER_TASK_TIMEOUT_SECONDS: int = 120
+    WORKER_TASK_MAX_ATTEMPTS: int = 3
+    WORKER_TASK_LEASE_SECONDS: int = 45
+    WORKER_HEARTBEAT_TIMEOUT_SECONDS: int = 60
+
     # TOKENMURAH PRICING
     # Semua tarif dalam Rupiah per 1 juta token.
 
