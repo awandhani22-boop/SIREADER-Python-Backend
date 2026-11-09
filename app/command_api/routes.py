@@ -15,7 +15,7 @@ from app.command_api.security import enforce_command_rate_limit, verify_command_
 from app.command_api.service import CommandConflictError, execute_idempotent_command
 from app.workers.models import ActorType, WorkTaskAttemptRecord, WorkTaskRecord
 from app.workers.registry import CAPABILITY_CATALOG
-from app.workers.runtime_contract import ActivityEventType
+from app.workers.runtime_contract import ActivityEventType, ReviewStatus
 from app.workers.repository import (
     WorkforceRepositoryError,
     WorkerUnavailableError,
@@ -23,6 +23,7 @@ from app.workers.repository import (
     cancel_task,
     enqueue_task,
     set_worker_accepting_tasks,
+    adjudicate_review,
 )
 
 router = APIRouter(
@@ -129,6 +130,54 @@ class WorkerSchedulingRequest(StrictRequest):
         return value
 
 
+class AdjudicateReviewRequest(StrictRequest):
+    review_id: str = Field(min_length=8, max_length=64)
+    decision: Literal["APPROVED", "EDITED", "REJECTED"]
+    expected_original_sha256: str = Field(min_length=64, max_length=64)
+    adjusted_output: dict | None = None
+    reason_code: str | None = Field(default=None, max_length=48)
+    notes: str | None = Field(default=None, max_length=500)
+
+    @field_validator("review_id")
+    @classmethod
+    def validate_review_id(cls, value: str) -> str:
+        if not re.fullmatch(r"rev_[A-Za-z0-9_-]{8,60}", value):
+            raise ValueError("review_id contains unsupported characters.")
+        return value
+
+    @field_validator("expected_original_sha256")
+    @classmethod
+    def validate_sha256(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("expected_original_sha256 must be a 64-char lowercase hex string.")
+        return value
+
+    @field_validator("adjusted_output")
+    @classmethod
+    def validate_adjusted_payload(cls, value: dict | None) -> dict | None:
+        if value is not None:
+            encoded = json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8")
+            if len(encoded) > 64 * 1024:
+                raise ValueError("adjusted_output exceeds the 64 KiB review limit.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_decision_fields(self) -> "AdjudicateReviewRequest":
+        if self.decision == "EDITED":
+            if self.adjusted_output is None:
+                raise ValueError("adjusted_output is required when decision is EDITED.")
+        else:
+            if self.adjusted_output is not None:
+                raise ValueError("adjusted_output must only be provided when decision is EDITED.")
+
+        if self.decision == "REJECTED":
+            if not self.reason_code:
+                raise ValueError("reason_code is required when decision is REJECTED.")
+        return self
+
+
 def get_command_session(request: Request):
     """Resolve only the dedicated command session, never the read-only API session."""
     factory = getattr(request.app.state, "session_factory", None)
@@ -151,6 +200,7 @@ def _run(
     idempotency_key: str,
     body: dict,
     executor,
+    actor_id: str = "local_operator",
 ) -> dict:
     try:
         with db.begin():
@@ -160,6 +210,7 @@ def _run(
                 idempotency_key=idempotency_key,
                 request_body=body,
                 executor=executor,
+                actor_id=actor_id,
             )
     except CommandConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -352,3 +403,47 @@ def set_worker_scheduling(
         }, correlation_id
 
     return _run(db, command_type="WORKER_SCHEDULING_SET", idempotency_key=key, body=body, executor=execute)
+
+
+@router.post("/reviews/adjudicate")
+def adjudicate_task_review(
+    request: AdjudicateReviewRequest,
+    operator_id: str = Header(..., alias="X-Operator-Id"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_command_session),
+) -> dict:
+    if not operator_id or not re.fullmatch(r"[A-Za-z0-9._~-]{3,64}", operator_id):
+        raise HTTPException(status_code=400, detail="A valid X-Operator-Id header is required.")
+
+    key = _idempotency_key(idempotency_key)
+    body = request.model_dump(mode="json")
+
+    def execute(correlation_id: str):
+        rev, task = adjudicate_review(
+            db,
+            review_id=request.review_id,
+            decision=ReviewStatus(request.decision),
+            operator_id=operator_id,
+            expected_sha256=request.expected_original_sha256,
+            adjusted_output=request.adjusted_output,
+            reason_code=request.reason_code,
+            notes=request.notes,
+        )
+        return rev.review_id, {
+            "accepted": True,
+            "review_id": rev.review_id,
+            "task_id": task.task_id,
+            "decision": rev.status,
+            "adjudicated_by": rev.adjudicated_by,
+            "adjudicated_at": rev.adjudicated_at.isoformat() if rev.adjudicated_at else None,
+            "task_status": task.status,
+        }, task.correlation_id
+
+    return _run(
+        db,
+        command_type="REVIEW_ADJUDICATE",
+        idempotency_key=key,
+        body=body,
+        executor=execute,
+        actor_id=operator_id,
+    )

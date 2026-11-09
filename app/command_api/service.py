@@ -22,9 +22,9 @@ def _fingerprint(command_type: str, request_body: dict) -> str:
     ).encode("utf-8")
     return sha256(canonical).hexdigest()
 
-def _existing_result(db: Session, *, idempotency_key: str, request_fingerprint: str) -> dict | None:
+def _existing_result(db: Session, *, actor_id: str, idempotency_key: str, request_fingerprint: str) -> dict | None:
     row = db.scalar(select(WorkforceCommandAuditRecord).where(
-        WorkforceCommandAuditRecord.actor_id == COMMAND_ACTOR_ID,
+        WorkforceCommandAuditRecord.actor_id == actor_id,
         WorkforceCommandAuditRecord.idempotency_key == idempotency_key,
     ))
     if row is None:
@@ -38,6 +38,7 @@ def _existing_result(db: Session, *, idempotency_key: str, request_fingerprint: 
 def execute_idempotent_command(
     db: Session, *, command_type: str, idempotency_key: str,
     request_body: dict, executor: Callable[[str], tuple[str, dict, str | None]],
+    actor_id: str = COMMAND_ACTOR_ID,
 ) -> dict:
     """Commit the mutation and append-only audit in one transaction."""
     if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 128:
@@ -45,7 +46,7 @@ def execute_idempotent_command(
     if not command_type or len(command_type) > 40:
         raise ValueError("Invalid command type.")
     fingerprint = _fingerprint(command_type, request_body)
-    replay = _existing_result(db, idempotency_key=idempotency_key, request_fingerprint=fingerprint)
+    replay = _existing_result(db, actor_id=actor_id, idempotency_key=idempotency_key, request_fingerprint=fingerprint)
     if replay is not None:
         return replay
     command_id = uuid4().hex
@@ -56,13 +57,13 @@ def execute_idempotent_command(
             correlation_id = domain_correlation_id or command_correlation_id
             created_at = datetime.now(timezone.utc)
             result = {
-                "command_id": command_id, "actor_id": COMMAND_ACTOR_ID,
+                "command_id": command_id, "actor_id": actor_id,
                 "command_type": command_type, "target_id": target_id,
                 "correlation_id": correlation_id, "outcome": outcome,
                 "created_at": created_at.isoformat(), "replayed": False,
             }
             db.add(WorkforceCommandAuditRecord(
-                command_id=command_id, actor_id=COMMAND_ACTOR_ID,
+                command_id=command_id, actor_id=actor_id,
                 command_type=command_type, target_id=target_id,
                 idempotency_key=idempotency_key, request_fingerprint=fingerprint,
                 correlation_id=correlation_id, outcome=result, created_at=created_at,
@@ -70,7 +71,7 @@ def execute_idempotent_command(
             db.flush()
             return result
     except IntegrityError:
-        replay = _existing_result(db, idempotency_key=idempotency_key, request_fingerprint=fingerprint)
+        replay = _existing_result(db, actor_id=actor_id, idempotency_key=idempotency_key, request_fingerprint=fingerprint)
         if replay is None:
             raise
         return replay

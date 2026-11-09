@@ -9,6 +9,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.command_api.server import create_command_app
 from app.database.models import Base
+import hashlib
+from app.ai.sanitizer import canonical_json_bytes
 from app.workers.models import (
     WorkActivityEventRecord,
     WorkTaskAttemptRecord,
@@ -18,6 +20,8 @@ from app.workers.models import (
     WorkerDefinitionRecord,
     WorkerHeartbeatRecord,
     WorkforceCommandAuditRecord,
+    WorkforceTaskReviewRecord,
+    WorkforceTaskReviewPayloadRecord,
 )
 from app.workers.repository import enqueue_task, sync_default_registry, claim_next_task
 
@@ -32,6 +36,8 @@ TABLES = [
     WorkTaskAttemptRecord.__table__,
     WorkActivityEventRecord.__table__,
     WorkforceCommandAuditRecord.__table__,
+    WorkforceTaskReviewRecord.__table__,
+    WorkforceTaskReviewPayloadRecord.__table__,
 ]
 
 
@@ -424,3 +430,302 @@ def test_retry_rejects_attempt_with_provider_start_timestamp_without_request_id(
     with Session() as db:
         assert len(db.scalars(select(WorkTaskRecord)).all()) == 1
         assert db.get(WorkTaskRecord, task_id).status == "FAILED"
+
+
+
+def _seed_pending_review(
+    Session,
+    *,
+    review_id: str = "rev_test_review_001",
+    task_id: str = "task-rev-001",
+    attempt_id: str = "att-rev-001",
+    original_output: dict | None = None,
+    correlation_id: str = "corr-rev-001",
+) -> tuple[str, str, str]:
+    if original_output is None:
+        original_output = {"summary": "Analysis completed successfully", "metrics": [1, 2, 3]}
+    canonical_bytes = canonical_json_bytes(original_output)
+    orig_sha = hashlib.sha256(canonical_bytes).hexdigest()
+    now = datetime.now(timezone.utc)
+    with Session.begin() as db:
+        task = WorkTaskRecord(
+            task_id=task_id,
+            idempotency_key="idemp-" + task_id,
+            correlation_id=correlation_id,
+            task_type="SUMMARIZATION",
+            title="Reviewable task",
+            required_capability="summarization",
+            requested_worker_id="haiku",
+            assigned_worker_id="haiku",
+            status="COMPLETED",
+            result_payload=None,
+            payload_expires_at=now + timedelta(days=7),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(task)
+        attempt = WorkTaskAttemptRecord(
+            attempt_id=attempt_id,
+            task_id=task_id,
+            worker_id="haiku",
+            lease_token="lease-" + attempt_id,
+            attempt_number=1,
+            status="COMPLETED",
+            created_at=now,
+        )
+        db.add(attempt)
+        review = WorkforceTaskReviewRecord(
+            review_id=review_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            status="PENDING",
+            original_output_sha256=orig_sha,
+            review_expires_at=now + timedelta(hours=24),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(review)
+        rev_payload = WorkforceTaskReviewPayloadRecord(
+            review_id=review_id,
+            original_output=original_output,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(rev_payload)
+    return review_id, task_id, orig_sha
+
+
+def test_adjudicate_review_requires_valid_operator_header_and_token(command_environment):
+    client, Session = command_environment
+    rev_id, task_id, sha = _seed_pending_review(Session, review_id="rev_test_sec_00000001")
+
+    # Missing bearer
+    resp = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": sha},
+        headers={"X-Operator-Id": "ops-alice", "Idempotency-Key": "key-sec-01"},
+    )
+    assert resp.status_code == 401
+
+    # Missing X-Operator-Id header
+    resp = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": sha},
+        headers={**AUTH, "Idempotency-Key": "key-sec-02"},
+    )
+    assert resp.status_code == 422  # Missing required header
+
+    # Invalid X-Operator-Id header format
+    resp = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": sha},
+        headers={**AUTH, "X-Operator-Id": "bad operator name with spaces!", "Idempotency-Key": "key-sec-03"},
+    )
+    assert resp.status_code == 400
+
+    # Malformed SHA256 in body
+    resp = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": "not-a-sha"},
+        headers={**AUTH, "X-Operator-Id": "ops-alice", "Idempotency-Key": "key-sec-04"},
+    )
+    assert resp.status_code == 422
+
+
+def test_adjudicate_review_approved_releases_original_output_and_audits(command_environment):
+    client, Session = command_environment
+    output_dict = {"summary": "Everything normal", "count": 42}
+    rev_id, task_id, sha = _seed_pending_review(
+        Session, review_id="rev_test_app_00000001", task_id="task-app-001", original_output=output_dict
+    )
+
+    resp = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": sha, "notes": "LGTM"},
+        headers={**AUTH, "X-Operator-Id": "ops-alice", "Idempotency-Key": "key-app-001"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["outcome"]["accepted"] is True
+    assert data["outcome"]["decision"] == "APPROVED"
+    assert data["outcome"]["adjudicated_by"] == "ops-alice"
+
+    with Session() as db:
+        task = db.get(WorkTaskRecord, task_id)
+        assert task.result_payload == output_dict
+
+        rev = db.get(WorkforceTaskReviewRecord, rev_id)
+        assert rev.status == "APPROVED"
+        assert rev.adjudicated_by == "ops-alice"
+        assert rev.notes == "LGTM"
+
+        event = db.scalar(
+            select(WorkActivityEventRecord).where(
+                WorkActivityEventRecord.task_id == task_id,
+                WorkActivityEventRecord.event_type == "HUMAN_REVIEW_APPROVED",
+            )
+        )
+        assert event is not None
+        assert event.actor_id == "ops-alice"
+
+        audit = db.scalar(
+            select(WorkforceCommandAuditRecord).where(
+                WorkforceCommandAuditRecord.idempotency_key == "key-app-001"
+            )
+        )
+        assert audit is not None
+        assert audit.command_type == "REVIEW_ADJUDICATE"
+        assert audit.actor_id == "ops-alice"
+
+
+def test_adjudicate_review_edited_sanitizes_and_releases_adjusted_output(command_environment):
+    client, Session = command_environment
+    output_dict = {"summary": "Original summary"}
+    rev_id, task_id, sha = _seed_pending_review(
+        Session, review_id="rev_test_edit_00000001", task_id="task-edit-001", original_output=output_dict
+    )
+
+    adjusted = {"summary": "Corrected summary", "api_key": "secret-key-12345"}
+    resp = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={
+            "review_id": rev_id,
+            "decision": "EDITED",
+            "expected_original_sha256": sha,
+            "adjusted_output": adjusted,
+            "notes": "Corrected typos and redacted credentials",
+        },
+        headers={**AUTH, "X-Operator-Id": "ops-bob", "Idempotency-Key": "key-edit-001"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["outcome"]["accepted"] is True
+    assert data["outcome"]["decision"] == "EDITED"
+    assert data["outcome"]["adjudicated_by"] == "ops-bob"
+
+    with Session() as db:
+        task = db.get(WorkTaskRecord, task_id)
+        assert task.result_payload["summary"] == "Corrected summary"
+        assert task.result_payload["api_key"] == "[REDACTED]"
+
+        rev = db.get(WorkforceTaskReviewRecord, rev_id)
+        assert rev.status == "EDITED"
+        assert rev.adjusted_output_sha256 is not None
+        assert rev.adjudicated_by == "ops-bob"
+
+        payload = db.get(WorkforceTaskReviewPayloadRecord, rev_id)
+        assert payload.adjusted_output["api_key"] == "[REDACTED]"
+
+        event = db.scalar(
+            select(WorkActivityEventRecord).where(
+                WorkActivityEventRecord.task_id == task_id,
+                WorkActivityEventRecord.event_type == "HUMAN_REVIEW_EDITED",
+            )
+        )
+        assert event is not None
+        assert event.actor_id == "ops-bob"
+
+
+def test_adjudicate_review_rejected_leaves_result_null_and_records_reason(command_environment):
+    client, Session = command_environment
+    output_dict = {"summary": "Hallucinated summary"}
+    rev_id, task_id, sha = _seed_pending_review(
+        Session, review_id="rev_test_rej_00000001", task_id="task-rej-001", original_output=output_dict
+    )
+
+    resp = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={
+            "review_id": rev_id,
+            "decision": "REJECTED",
+            "expected_original_sha256": sha,
+            "reason_code": "HALLUCINATION",
+            "notes": "Incorrect facts generated",
+        },
+        headers={**AUTH, "X-Operator-Id": "ops-carol", "Idempotency-Key": "key-rej-001"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["outcome"]["accepted"] is True
+    assert data["outcome"]["decision"] == "REJECTED"
+
+    with Session() as db:
+        task = db.get(WorkTaskRecord, task_id)
+        assert task.status == "COMPLETED"
+        assert task.result_payload is None  # Gated release kept NULL
+
+        rev = db.get(WorkforceTaskReviewRecord, rev_id)
+        assert rev.status == "REJECTED"
+        assert rev.reason_code == "HALLUCINATION"
+        assert rev.adjudicated_by == "ops-carol"
+
+        event = db.scalar(
+            select(WorkActivityEventRecord).where(
+                WorkActivityEventRecord.task_id == task_id,
+                WorkActivityEventRecord.event_type == "HUMAN_REVIEW_REJECTED",
+            )
+        )
+        assert event is not None
+        assert event.actor_id == "ops-carol"
+
+
+def test_adjudicate_review_optimistic_concurrency_conflict(command_environment):
+    client, Session = command_environment
+    rev_id, task_id, sha = _seed_pending_review(Session, review_id="rev_test_occ_00000001")
+
+    wrong_sha = "0" * 64
+    resp = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": wrong_sha},
+        headers={**AUTH, "X-Operator-Id": "ops-alice", "Idempotency-Key": "key-occ-001"},
+    )
+    assert resp.status_code == 409
+
+
+def test_adjudicate_review_terminal_review_conflict(command_environment):
+    client, Session = command_environment
+    rev_id, task_id, sha = _seed_pending_review(Session, review_id="rev_test_term_00000001")
+
+    first = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": sha},
+        headers={**AUTH, "X-Operator-Id": "ops-alice", "Idempotency-Key": "key-term-001"},
+    )
+    assert first.status_code == 200
+
+    # Second call with different idempotency key
+    second = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": sha},
+        headers={**AUTH, "X-Operator-Id": "ops-alice", "Idempotency-Key": "key-term-002"},
+    )
+    assert second.status_code == 409
+
+
+def test_adjudicate_review_idempotency_replay(command_environment):
+    client, Session = command_environment
+    rev_id, task_id, sha = _seed_pending_review(Session, review_id="rev_test_idem_00000001")
+
+    first = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": sha},
+        headers={**AUTH, "X-Operator-Id": "ops-alice", "Idempotency-Key": "key-idem-001"},
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/v1/commands/reviews/adjudicate",
+        json={"review_id": rev_id, "decision": "APPROVED", "expected_original_sha256": sha},
+        headers={**AUTH, "X-Operator-Id": "ops-alice", "Idempotency-Key": "key-idem-001"},
+    )
+    assert second.status_code == 200
+    assert first.json()["command_id"] == second.json()["command_id"] and first.json()["outcome"] == second.json()["outcome"]
+    assert second.json()["replayed"] is True
+
+    with Session() as db:
+        audits = db.scalars(
+            select(WorkforceCommandAuditRecord).where(
+                WorkforceCommandAuditRecord.idempotency_key == "key-idem-001"
+            )
+        ).all()
+        assert len(audits) == 1

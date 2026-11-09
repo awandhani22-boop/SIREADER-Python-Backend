@@ -823,3 +823,187 @@ def get_review_by_id(db: Session, review_id: str) -> WorkforceTaskReviewRecord |
 
 def get_review_payload(db: Session, review_id: str) -> WorkforceTaskReviewPayloadRecord | None:
     return db.scalar(select(WorkforceTaskReviewPayloadRecord).where(WorkforceTaskReviewPayloadRecord.review_id == review_id))
+
+
+def adjudicate_review(
+    db: Session,
+    *,
+    review_id: str,
+    decision: ReviewStatus | str,
+    operator_id: str,
+    expected_sha256: str,
+    adjusted_output: dict | None = None,
+    reason_code: str | None = None,
+    notes: str | None = None,
+    now: datetime | None = None,
+) -> tuple[WorkforceTaskReviewRecord, WorkTaskRecord]:
+    """
+    Adjudicate a PENDING workforce task review.
+    
+    Invariants:
+    1. Row-level locks acquired on review, review_payload, task, and attempt.
+    2. Review must be in PENDING status.
+    3. expected_sha256 must match original_output_sha256 (optimistic concurrency).
+    4. APPROVED: releases original_output into task.result_payload.
+    5. EDITED: validates & sanitizes adjusted_output, calculates adjusted_output_sha256,
+       updates payload table, releases sanitized adjusted_output into task.result_payload.
+    6. REJECTED: leaves task.result_payload as None (quarantine preserved).
+    7. All decisions leave task execution status as COMPLETED.
+    8. Transaction ordering complies with DB triggers: review status updated first before writing adjusted_output.
+    """
+    stamp = _now(now)
+    if isinstance(decision, str):
+        try:
+            dec = ReviewStatus(decision)
+        except ValueError:
+            raise WorkforceRepositoryError(f"Invalid adjudication decision: {decision}")
+    else:
+        dec = decision
+
+    if dec not in (ReviewStatus.APPROVED, ReviewStatus.EDITED, ReviewStatus.REJECTED):
+        raise WorkforceRepositoryError(f"Decision {dec.value} is not a valid adjudication decision")
+
+    review = db.scalar(
+        select(WorkforceTaskReviewRecord)
+        .where(WorkforceTaskReviewRecord.review_id == review_id)
+        .with_for_update()
+    )
+    if review is None:
+        raise WorkforceRepositoryError("review not found")
+
+    if review.status != ReviewStatus.PENDING.value:
+        raise WorkforceRepositoryError(f"review is not pending (status: {review.status})")
+
+    if review.original_output_sha256 != expected_sha256:
+        raise WorkforceRepositoryError("Review output hash mismatch: expected sha256 does not match current output hash")
+
+    task = db.scalar(
+        select(WorkTaskRecord)
+        .where(WorkTaskRecord.task_id == review.task_id)
+        .with_for_update()
+    )
+    if task is None:
+        raise WorkforceRepositoryError("parent task not found")
+
+    attempt = db.scalar(
+        select(WorkTaskAttemptRecord)
+        .where(WorkTaskAttemptRecord.attempt_id == review.attempt_id)
+        .with_for_update()
+    )
+    if attempt is None:
+        raise WorkforceRepositoryError("parent attempt not found")
+
+    payload_rec = db.scalar(
+        select(WorkforceTaskReviewPayloadRecord)
+        .where(WorkforceTaskReviewPayloadRecord.review_id == review_id)
+        .with_for_update()
+    )
+    if payload_rec is None:
+        raise WorkforceRepositoryError("review payload not found")
+
+    safe_notes = (notes or "")[:500] if notes else None
+
+    if dec == ReviewStatus.APPROVED:
+        review.status = ReviewStatus.APPROVED.value
+        review.adjudicated_by = operator_id
+        review.adjudicated_at = stamp
+        review.notes = safe_notes
+        review.updated_at = stamp
+        db.flush()
+
+        # Gated release of original sanitized output
+        task.result_payload = payload_rec.original_output
+        task.updated_at = stamp
+
+        _append_event(
+            db,
+            event_type=ActivityEventType.HUMAN_REVIEW_APPROVED,
+            correlation_id=task.correlation_id,
+            worker_id=attempt.worker_id,
+            task_id=task.task_id,
+            attempt_id=attempt.attempt_id,
+            payload={"decision": "APPROVED", "operator_id": operator_id, "original_output_sha256": review.original_output_sha256},
+            occurred_at=stamp,
+            actor_type=ActorType.OPERATOR,
+            actor_id=operator_id,
+        )
+
+    elif dec == ReviewStatus.EDITED:
+        if not adjusted_output:
+            raise WorkforceRepositoryError("adjusted_output is required when decision is EDITED")
+
+        sanitized_adjusted = sanitize_review_payload(adjusted_output)
+        validate_review_payload_size(sanitized_adjusted)
+        adj_sha256 = canonical_sha256(sanitized_adjusted)
+
+        # 1. Update review to EDITED first so trigger allows writing adjusted_output
+        review.status = ReviewStatus.EDITED.value
+        review.adjusted_output_sha256 = adj_sha256
+        review.adjudicated_by = operator_id
+        review.adjudicated_at = stamp
+        review.notes = safe_notes
+        review.updated_at = stamp
+        db.flush()
+
+        # 2. Update review payload
+        payload_rec.adjusted_output = sanitized_adjusted
+        payload_rec.updated_at = stamp
+        db.flush()
+
+        # 3. Gated release of edited output
+        task.result_payload = sanitized_adjusted
+        task.updated_at = stamp
+
+        _append_event(
+            db,
+            event_type=ActivityEventType.HUMAN_REVIEW_EDITED,
+            correlation_id=task.correlation_id,
+            worker_id=attempt.worker_id,
+            task_id=task.task_id,
+            attempt_id=attempt.attempt_id,
+            payload={
+                "decision": "EDITED",
+                "operator_id": operator_id,
+                "original_output_sha256": review.original_output_sha256,
+                "adjusted_output_sha256": adj_sha256,
+            },
+            occurred_at=stamp,
+            actor_type=ActorType.OPERATOR,
+            actor_id=operator_id,
+        )
+
+    elif dec == ReviewStatus.REJECTED:
+        if not reason_code:
+            raise WorkforceRepositoryError("reason_code is required when decision is REJECTED")
+
+        safe_reason = reason_code[:48]
+        review.status = ReviewStatus.REJECTED.value
+        review.reason_code = safe_reason
+        review.adjudicated_by = operator_id
+        review.adjudicated_at = stamp
+        review.notes = safe_notes
+        review.updated_at = stamp
+        db.flush()
+
+        # Quarantine remains: result_payload remains None, task status remains COMPLETED
+        task.updated_at = stamp
+
+        _append_event(
+            db,
+            event_type=ActivityEventType.HUMAN_REVIEW_REJECTED,
+            correlation_id=task.correlation_id,
+            worker_id=attempt.worker_id,
+            task_id=task.task_id,
+            attempt_id=attempt.attempt_id,
+            payload={
+                "decision": "REJECTED",
+                "operator_id": operator_id,
+                "reason_code": safe_reason,
+            },
+            occurred_at=stamp,
+            actor_type=ActorType.OPERATOR,
+            actor_id=operator_id,
+        )
+
+    db.flush()
+    return review, task
