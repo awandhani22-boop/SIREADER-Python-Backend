@@ -538,3 +538,19 @@ def test_database_failure_returns_503_without_leaking_connection_details(monkeyp
     assert response.json() == {"detail": "Read-only database is unavailable."}
     assert "private-db-host" not in response.text
     assert "password=hidden" not in response.text
+
+
+def test_telemetry_budget_warning_levels_follow_cost_guard_configuration(monkeypatch):
+    from app.api.routes import telemetry
+
+    monkeypatch.setattr(
+        telemetry.api_settings,
+        "AI_ANTHROPIC_WARNING_THRESHOLDS",
+        "0.65,0.82,0.93",
+    )
+    assert telemetry._warning_level(Decimal("64"), Decimal("100")) == ("NONE", None)
+    assert telemetry._warning_level(Decimal("65"), Decimal("100")) == ("SOFT", 65)
+    assert telemetry._warning_level(Decimal("82"), Decimal("100")) == ("WARNING", 82)
+    assert telemetry._warning_level(Decimal("93"), Decimal("100")) == ("CRITICAL", 93)
+    assert telemetry._warning_level(Decimal("101"), Decimal("100"), Decimal("500")) == ("CRITICAL", 93)
+    assert telemetry._warning_level(Decimal("500"), Decimal("100"), Decimal("500")) == ("HARD_LIMIT", 100)

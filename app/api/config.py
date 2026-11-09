@@ -49,6 +49,7 @@ class ApiSettings(BaseSettings):
     AI_REASONING_MONTHLY_BUDGET_RP: int = 22500
     AI_ESCALATION_MONTHLY_BUDGET_RP: int = 2500
     AI_ANTHROPIC_MONTHLY_BUDGET_USD: Decimal = Decimal("5.00")
+    AI_ANTHROPIC_WARNING_THRESHOLDS: str = "0.70,0.85,0.95"
 
     model_config = SettingsConfigDict(
         env_file=".env",

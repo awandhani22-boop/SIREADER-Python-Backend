@@ -50,18 +50,39 @@ def _money(value: Any) -> Decimal:
     return Decimal(str(value or 0)).quantize(Decimal("0.000001"))
 
 
+def _configured_warning_thresholds() -> tuple[int, ...]:
+    values: list[int] = []
+    try:
+        for part in str(api_settings.AI_ANTHROPIC_WARNING_THRESHOLDS).split(","):
+            raw = part.strip()
+            if not raw:
+                continue
+            number = Decimal(raw)
+            if number <= 0 or number > 1:
+                raise ValueError("warning threshold must be within (0, 1]")
+            percent = int((number * Decimal("100")).quantize(Decimal("1")))
+            if percent not in values:
+                values.append(percent)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="AI warning threshold configuration is invalid.") from exc
+    return tuple(sorted(values))
+
+
 def _warning_level(projected: Decimal, budget: Decimal, hard_limit: Decimal | None = None) -> tuple[str, int | None]:
     if hard_limit is not None and hard_limit > 0 and projected >= hard_limit:
         return "HARD_LIMIT", 100
     if budget <= 0:
         return "NONE", None
     percent = projected / budget * Decimal("100")
-    if percent >= 95:
-        return "CRITICAL", 95
-    if percent >= 85:
-        return "WARNING", 85
-    if percent >= 70:
-        return "SOFT", 70
+    thresholds = _configured_warning_thresholds()
+    if not thresholds:
+        return "NONE", None
+    if len(thresholds) >= 3 and percent >= thresholds[-1]:
+        return "CRITICAL", thresholds[-1]
+    if len(thresholds) >= 2 and percent >= thresholds[-2]:
+        return "WARNING", thresholds[-2]
+    if percent >= thresholds[0]:
+        return "SOFT", thresholds[0]
     return "NONE", None
 
 
@@ -249,7 +270,7 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
             cost_view.c.task_id, cost_view.c.worker_id, cost_view.c.tier,
             cost_view.c.model, cost_view.c.billing_currency,
         )
-        .order_by(func.count().desc(), cost_view.c.task_id.asc())
+        .order_by(func.max(cost_view.c.usage_date).desc(), cost_view.c.task_id.asc())
         .limit(25)
     ).mappings().all()
     recent_task_costs = []
