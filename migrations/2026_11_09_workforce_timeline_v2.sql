@@ -20,8 +20,8 @@ $guard$;
 ALTER TABLE public.workforce_tasks
     ADD COLUMN IF NOT EXISTS related_task_id varchar(64) REFERENCES public.workforce_tasks(task_id) ON DELETE SET NULL;
 
-CREATE INDEX IF NOT EXISTS ix_workforce_tasks_related_task
-    ON public.workforce_tasks(related_task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workforce_tasks_related_task
+    ON public.workforce_tasks(related_task_id) WHERE related_task_id IS NOT NULL;
 
 -- 2. Harden workforce_activity_events
 ALTER TABLE public.workforce_activity_events

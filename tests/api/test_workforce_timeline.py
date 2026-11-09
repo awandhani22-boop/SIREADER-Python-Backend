@@ -71,6 +71,10 @@ def timeline_env(monkeypatch):
     app.dependency_overrides[get_ro_session] = _get_test_session
     client = TestClient(app)
 
+    with Session() as cleanup:
+        cleanup.execute(text("UPDATE public.workforce_tasks SET status = 'CANCELLED' WHERE status IN ('QUEUED', 'CLAIMED', 'RUNNING', 'RETRY_WAIT')"))
+        cleanup.commit()
+
     yield {
         "engine": engine,
         "Session": Session,
@@ -301,3 +305,59 @@ def test_workforce_timeline_payload_sanitization(timeline_env):
         assert "confidential" not in summary_str
         assert "secret_api_key" not in summary_str
         assert "password" not in summary_str
+
+
+def test_timeline_single_direct_retry_enforcement(timeline_env):
+    """Prove a failed task can only be directly retried once."""
+    from app.workers.models import WorkTaskRecord, WorkTaskAttemptRecord
+    from app.workers.repository import sync_default_registry
+    from app.command_api.routes import retry_failed_non_trading_task, TaskIdRequest
+    from fastapi import HTTPException
+    import pytest
+
+    Session = timeline_env["Session"]
+    with Session() as db_session:
+        sync_default_registry(db_session)
+        db_session.commit()
+
+        task_id = f"task_test_retry_single_{uuid4().hex[:8]}"
+
+        task = WorkTaskRecord(
+            task_id=task_id,
+            idempotency_key=f"idem_single_{uuid4().hex}",
+            correlation_id="corr_test_single_retry",
+            schema_version=1,
+            task_type="QUICK_RESEARCH",
+            title="Single retry test",
+            required_capability="quick_research",
+            priority=100,
+            status="FAILED",
+            attempts=1,
+            max_attempts=3,
+            input_payload={"symbol": "EURUSD"},
+        )
+        db_session.add(task)
+        db_session.flush()
+
+        attempt = WorkTaskAttemptRecord(
+            attempt_id=f"att_test_single_retry_{uuid4().hex[:8]}",
+            task_id=task_id,
+            attempt_number=1,
+            worker_id="haiku",
+            lease_token=f"lease_token_{uuid4().hex[:12]}",
+            status="FAILED",
+        )
+        db_session.add(attempt)
+        db_session.commit()
+
+        # First retry succeeds
+        req1 = TaskIdRequest(task_id=task_id)
+        res1 = retry_failed_non_trading_task(req1, idempotency_key=f"idemp_retry_1_{uuid4().hex[:6]}", db=db_session)
+        assert res1["command_type"] == "TASK_RETRY"
+
+        # Second retry with different idempotency key fails with 409 TASK_ALREADY_RETRIED
+        req2 = TaskIdRequest(task_id=task_id)
+        with pytest.raises(HTTPException) as exc_info:
+            retry_failed_non_trading_task(req2, idempotency_key=f"idemp_retry_2_{uuid4().hex[:6]}", db=db_session)
+        assert exc_info.value.status_code == 409
+        assert "TASK_ALREADY_RETRIED" in exc_info.value.detail

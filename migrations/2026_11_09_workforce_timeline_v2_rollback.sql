@@ -50,6 +50,7 @@ ALTER TABLE public.workforce_activity_events
     DROP COLUMN IF EXISTS actor_type,
     DROP COLUMN IF EXISTS event_seq;
 
+DROP INDEX IF EXISTS public.uq_workforce_tasks_related_task;
 DROP INDEX IF EXISTS public.ix_workforce_tasks_related_task;
 
 ALTER TABLE public.workforce_tasks

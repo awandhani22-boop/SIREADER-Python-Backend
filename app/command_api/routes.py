@@ -283,6 +283,16 @@ def retry_failed_non_trading_task(
             or last_attempt.attempt_number != original.attempts
         ):
             raise HTTPException(status_code=409, detail="TASK_PROVIDER_OUTCOME_NOT_CONFIRMED_SAFE")
+        already_retried = db.scalar(
+            select(WorkTaskRecord.task_id)
+            .where(WorkTaskRecord.related_task_id == original.task_id)
+            .limit(1)
+        )
+        if already_retried is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"TASK_ALREADY_RETRIED: Task has already been retried as {already_retried}",
+            )
         new_task, created = enqueue_task(
             db,
             task_type=original.task_type,
