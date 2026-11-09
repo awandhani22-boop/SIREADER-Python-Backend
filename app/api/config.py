@@ -5,6 +5,7 @@ API Gateway DILARANG menggunakan DATABASE_URL utama dengan hak tulis.
 Jika SIREADER_API_DATABASE_URL belum diatur, live database connection wajib fail-closed.
 """
 
+from decimal import Decimal
 from typing import List
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -36,6 +37,18 @@ class ApiSettings(BaseSettings):
         default="http://localhost:5173,http://127.0.0.1:5173",
         description="Daftar origin CORS yang diizinkan, dipisahkan koma.",
     )
+
+    # Budget observability mirrors app.config.Settings environment names.
+    # This read-only API config intentionally does not import the main app settings
+    # or require Telegram/database write credentials.
+    AI_TARGET_DAILY_BUDGET_RP: int = 10000
+    AI_HARD_DAILY_LIMIT_RP: int = 50000
+    AI_BUDGET_PERIOD_DAYS: int = 30
+    AI_MONTHLY_BUDGET_RP: int = 50000
+    AI_FAST_MONTHLY_BUDGET_RP: int = 25000
+    AI_REASONING_MONTHLY_BUDGET_RP: int = 22500
+    AI_ESCALATION_MONTHLY_BUDGET_RP: int = 2500
+    AI_ANTHROPIC_MONTHLY_BUDGET_USD: Decimal = Decimal("5.00")
 
     model_config = SettingsConfigDict(
         env_file=".env",

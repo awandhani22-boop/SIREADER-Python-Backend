@@ -15,7 +15,7 @@ from app.api.schemas import (
     TelemetryUsageResponse, TokenBreakdownDTO, WorkerCostBreakdownDTO,
  )
 from app.api.views import v_api_telemetry_usage, v_api_workforce_ai_usage
-from app.config import settings
+from app.api.config import api_settings
 
 router = APIRouter(prefix="/api/v1/telemetry", tags=["telemetry"])
 JAKARTA = ZoneInfo("Asia/Jakarta")
@@ -113,7 +113,7 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
         .group_by(usage.c.billing_currency, usage.c.status)
     ).mappings().all()
 
-    month_days = int(settings.AI_BUDGET_PERIOD_DAYS)
+    month_days = int(api_settings.AI_BUDGET_PERIOD_DAYS)
     if not 1 <= month_days <= 366:
         raise HTTPException(status_code=500, detail="AI budget period configuration is invalid.")
     month_start = today - timedelta(days=month_days - 1)
