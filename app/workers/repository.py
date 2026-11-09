@@ -18,11 +18,16 @@ from app.workers.models import (
     ActorType, WorkActivityEventRecord, WorkTaskAttemptRecord, WorkTaskRecord,
     WorkerCapabilityAssignmentRecord, WorkerCapabilityRecord,
     WorkerDefinitionRecord, WorkerHeartbeatRecord,
+    WorkforceTaskReviewRecord, WorkforceTaskReviewPayloadRecord,
 )
 from app.workers.registry import CAPABILITY_CATALOG, build_default_registry
 from app.workers.runtime_contract import (
-    ActivityEventType, AttemptStatus, TaskStatus, WorkerHeartbeatContract,
+    ActivityEventType, AttemptStatus, TaskStatus, ReviewStatus, WorkerHeartbeatContract,
     WorkerProcessState, is_terminal_task_status, validate_task_transition,
+)
+from app.governance.review_policy import evaluate_review_eligibility
+from app.ai.sanitizer import (
+    sanitize_review_payload, canonical_sha256, validate_review_payload_size,
 )
 
 MAX_PAYLOAD_BYTES = 64 * 1024
@@ -387,7 +392,6 @@ def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload
     stamp = _now(now)
     validate_task_transition(TaskStatus(task.status), TaskStatus.COMPLETED)
     task.status = TaskStatus.COMPLETED.value
-    task.result_payload = payload
     task.completed_at = stamp
     task.payload_expires_at = _payload_expiry_for_status(TaskStatus.COMPLETED, stamp)
     task.updated_at = stamp
@@ -406,7 +410,67 @@ def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload
         if amount < 0:
             raise ValueError("cost_amount cannot be negative")
         attempt.cost_amount = amount
-    _append_event(db, event_type=ActivityEventType.TASK_COMPLETED, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, payload={"source": payload.get("source", "LIVE")}, occurred_at=stamp, actor_type=ActorType.WORKER, actor_id=attempt.worker_id)
+
+    # Evaluate review eligibility (backend-owned policy)
+    requires_review = evaluate_review_eligibility(task.required_capability, task.task_type, task.task_id)
+    if requires_review:
+        # Gated Output Quarantine: unapproved output remains NULL in task
+        task.result_payload = None
+        sanitized_output = sanitize_review_payload(payload)
+        validate_review_payload_size(sanitized_output)
+        sha256 = canonical_sha256(sanitized_output)
+        review_id = f"rev_{uuid4().hex[:16]}"
+        review_expires_at = stamp + timedelta(hours=24)
+
+        review_rec = WorkforceTaskReviewRecord(
+            review_id=review_id,
+            task_id=task.task_id,
+            attempt_id=attempt.attempt_id,
+            status=ReviewStatus.PENDING.value,
+            original_output_sha256=sha256,
+            review_expires_at=review_expires_at,
+            created_at=stamp,
+            updated_at=stamp,
+        )
+        db.add(review_rec)
+        db.flush()
+
+        payload_rec = WorkforceTaskReviewPayloadRecord(
+            review_id=review_id,
+            original_output=sanitized_output,
+            created_at=stamp,
+            updated_at=stamp,
+        )
+        db.add(payload_rec)
+
+        _append_event(
+            db,
+            event_type=ActivityEventType.HUMAN_REVIEW_QUEUED,
+            correlation_id=task.correlation_id,
+            worker_id=attempt.worker_id,
+            task_id=task.task_id,
+            attempt_id=attempt.attempt_id,
+            payload={"review_id": review_id, "original_output_sha256": sha256},
+            occurred_at=stamp,
+            actor_type=ActorType.SYSTEM,
+            actor_id="system",
+        )
+    else:
+        # Normal completion: release result directly
+        task.result_payload = payload
+
+    _append_event(
+        db,
+        event_type=ActivityEventType.TASK_COMPLETED,
+        correlation_id=task.correlation_id,
+        worker_id=attempt.worker_id,
+        task_id=task.task_id,
+        attempt_id=attempt.attempt_id,
+        payload={"source": payload.get("source", "LIVE"), "requires_review": requires_review},
+        occurred_at=stamp,
+        actor_type=ActorType.WORKER,
+        actor_id=attempt.worker_id,
+    )
     db.flush()
     return task
 
@@ -630,12 +694,16 @@ def purge_expired_task_payloads(
         TaskStatus.CANCELLED.value,
         TaskStatus.DEAD_LETTERED.value,
     ]
+    pending_review_tasks = select(WorkforceTaskReviewRecord.task_id).where(
+        WorkforceTaskReviewRecord.status == ReviewStatus.PENDING.value
+    )
     rows = db.execute(
         select(WorkTaskRecord).where(
             WorkTaskRecord.status.in_(purgeable_statuses),
             WorkTaskRecord.payload_expires_at.is_not(None),
             WorkTaskRecord.payload_expires_at <= stamp,
             WorkTaskRecord.payload_purged_at.is_(None),
+            WorkTaskRecord.task_id.not_in(pending_review_tasks),
         ).order_by(
             WorkTaskRecord.payload_expires_at.asc(),
             WorkTaskRecord.task_id.asc(),
@@ -648,3 +716,94 @@ def purge_expired_task_payloads(
     db.flush()
     return len(rows)
 
+
+
+def purge_expired_review_payloads(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    batch_size: int = 100,
+) -> int:
+    """Erase review payloads for terminal reviews after task retention has elapsed."""
+    if not 1 <= int(batch_size) <= 500:
+        raise ValueError("batch_size must be between 1 and 500")
+    stamp = _now(now)
+    terminal_statuses = [
+        ReviewStatus.APPROVED.value,
+        ReviewStatus.EDITED.value,
+        ReviewStatus.REJECTED.value,
+        ReviewStatus.EXPIRED.value,
+    ]
+    stmt = (
+        select(WorkforceTaskReviewPayloadRecord)
+        .join(WorkforceTaskReviewRecord, WorkforceTaskReviewPayloadRecord.review_id == WorkforceTaskReviewRecord.review_id)
+        .join(WorkTaskRecord, WorkforceTaskReviewRecord.task_id == WorkTaskRecord.task_id)
+        .where(
+            WorkforceTaskReviewPayloadRecord.payload_purged_at.is_(None),
+            WorkforceTaskReviewRecord.status.in_(terminal_statuses),
+            WorkTaskRecord.payload_expires_at.is_not(None),
+            WorkTaskRecord.payload_expires_at <= stamp,
+        )
+        .order_by(WorkforceTaskReviewPayloadRecord.created_at.asc())
+        .limit(int(batch_size))
+        .with_for_update(skip_locked=True)
+    )
+    rows = db.execute(stmt).scalars().all()
+    for item in rows:
+        item.original_output = None
+        item.adjusted_output = None
+        item.payload_purged_at = stamp
+        item.updated_at = stamp
+    db.flush()
+    return len(rows)
+
+
+def expire_stale_reviews(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    batch_size: int = 100,
+) -> int:
+    """Transition PENDING reviews past their review_expires_at to EXPIRED."""
+    if not 1 <= int(batch_size) <= 500:
+        raise ValueError("batch_size must be between 1 and 500")
+    stamp = _now(now)
+    stmt = (
+        select(WorkforceTaskReviewRecord)
+        .where(
+            WorkforceTaskReviewRecord.status == ReviewStatus.PENDING.value,
+            WorkforceTaskReviewRecord.review_expires_at <= stamp,
+        )
+        .order_by(WorkforceTaskReviewRecord.review_expires_at.asc())
+        .limit(int(batch_size))
+        .with_for_update(skip_locked=True)
+    )
+    rows = db.execute(stmt).scalars().all()
+    for r in rows:
+        r.status = ReviewStatus.EXPIRED.value
+        r.adjudicated_by = "system"
+        r.reason_code = "REVIEW_TIMED_OUT"
+        r.adjudicated_at = stamp
+        r.updated_at = stamp
+        _append_event(
+            db,
+            event_type=ActivityEventType.HUMAN_REVIEW_EXPIRED,
+            correlation_id=r.review_id,
+            worker_id=None,
+            task_id=r.task_id,
+            attempt_id=r.attempt_id,
+            payload={"review_id": r.review_id, "original_output_sha256": r.original_output_sha256, "reason_code": "REVIEW_TIMED_OUT"},
+            occurred_at=stamp,
+            actor_type=ActorType.SYSTEM,
+            actor_id="system",
+        )
+    db.flush()
+    return len(rows)
+
+
+def get_review_by_id(db: Session, review_id: str) -> WorkforceTaskReviewRecord | None:
+    return db.scalar(select(WorkforceTaskReviewRecord).where(WorkforceTaskReviewRecord.review_id == review_id))
+
+
+def get_review_payload(db: Session, review_id: str) -> WorkforceTaskReviewPayloadRecord | None:
+    return db.scalar(select(WorkforceTaskReviewPayloadRecord).where(WorkforceTaskReviewPayloadRecord.review_id == review_id))

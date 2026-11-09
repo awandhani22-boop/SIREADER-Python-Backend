@@ -170,7 +170,7 @@ class WorkforceCommandAuditRecord(Base):
     __table_args__ = (
         UniqueConstraint("actor_id", "idempotency_key", name="uq_workforce_command_actor_idempotency"),
         CheckConstraint(
-            "command_type IN ('TASK_ENQUEUE','TASK_CANCEL','TASK_RETRY','WORKER_SCHEDULING_SET')",
+            "command_type IN ('TASK_ENQUEUE','TASK_CANCEL','TASK_RETRY','WORKER_SCHEDULING_SET','REVIEW_ADJUDICATE')",
             name="ck_workforce_command_type",
         ),
         CheckConstraint("length(request_fingerprint) = 64", name="ck_workforce_command_fingerprint"),
@@ -189,3 +189,71 @@ class WorkforceCommandAuditRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
+
+
+
+class WorkforceTaskReviewRecord(Base):
+    """Permanent governance metadata record for human output reviews."""
+
+    __tablename__ = "workforce_task_reviews"
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_workforce_task_reviews_task"),
+        CheckConstraint(
+            "status IN ('PENDING', 'APPROVED', 'EDITED', 'REJECTED', 'EXPIRED')",
+            name="ck_workforce_task_reviews_status",
+        ),
+        CheckConstraint(
+            "original_output_sha256 ~ '^[0-9a-f]{64}$' AND (adjusted_output_sha256 IS NULL OR adjusted_output_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_workforce_task_reviews_sha256_format",
+        ),
+        CheckConstraint(
+            "(status = 'PENDING' AND adjudicated_at IS NULL AND adjudicated_by IS NULL) OR "
+            "(status = 'EXPIRED' AND adjudicated_at IS NOT NULL AND adjudicated_by = 'system' AND reason_code = 'REVIEW_TIMED_OUT') OR "
+            "(status IN ('APPROVED', 'EDITED', 'REJECTED') AND adjudicated_at IS NOT NULL AND adjudicated_by IS NOT NULL)",
+            name="ck_workforce_task_reviews_adjudication",
+        ),
+        CheckConstraint(
+            "(status = 'EDITED' AND adjusted_output_sha256 IS NOT NULL) OR (status != 'EDITED' AND adjusted_output_sha256 IS NULL)",
+            name="ck_workforce_task_reviews_edited",
+        ),
+        CheckConstraint(
+            "(status = 'REJECTED' AND reason_code IS NOT NULL) OR (status != 'REJECTED' AND (status != 'EXPIRED' OR reason_code = 'REVIEW_TIMED_OUT'))",
+            name="ck_workforce_task_reviews_rejected",
+        ),
+        Index("ix_workforce_task_reviews_status_created", "status", "created_at"),
+        Index("ix_workforce_task_reviews_expires", "review_expires_at"),
+    )
+
+    review_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("workforce_tasks.task_id", ondelete="RESTRICT"), nullable=False, unique=True)
+    attempt_id: Mapped[str] = mapped_column(ForeignKey("workforce_task_attempts.attempt_id", ondelete="RESTRICT"), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")
+    original_output_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    adjusted_output_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    adjudicated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    adjudicated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reason_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    review_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class WorkforceTaskReviewPayloadRecord(Base):
+    """Payload storage table for human output reviews subject to retention purging."""
+
+    __tablename__ = "workforce_task_review_payloads"
+    __table_args__ = (
+        CheckConstraint(
+            "(payload_purged_at IS NULL AND original_output IS NOT NULL) OR "
+            "(payload_purged_at IS NOT NULL AND original_output IS NULL AND adjusted_output IS NULL)",
+            name="ck_workforce_review_payloads_purged",
+        ),
+    )
+
+    review_id: Mapped[str] = mapped_column(ForeignKey("workforce_task_reviews.review_id", ondelete="RESTRICT"), primary_key=True)
+    original_output: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    adjusted_output: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    payload_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
