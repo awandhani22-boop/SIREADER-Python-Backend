@@ -308,6 +308,8 @@ def test_workforce_migration_security_and_task_lifecycle():
                     complete_task(
                         db, task_id=retry[0].task_id, lease_token=retry[1].lease_token,
                         result_payload={"source": "SIMULATED", "summary": "test completed"},
+                        force_human_review=True,
+                        review_trigger_reason="POSTGRES_RETENTION_TEST",
                         now=completed_at,
                     )
 
