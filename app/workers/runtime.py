@@ -24,6 +24,7 @@ from app.workers.runtime_contract import WorkerContract, WorkerHeartbeatContract
 logger = logging.getLogger(__name__)
 MAINTENANCE_INTERVAL_SECONDS = 15
 HEARTBEAT_INTERVAL_SECONDS = 15
+_last_maintenance_at: datetime | None = None
 MIN_LEASE_SECONDS = 5
 
 
@@ -141,17 +142,25 @@ def run_worker_once(
     if not settings.WORKER_RUNTIME_ENABLED:
         raise WorkerProviderError("WORKER_RUNTIME_DISABLED", "Set WORKER_RUNTIME_ENABLED=true to start workers.")
 
+    global _last_maintenance_at
     now = _utc_now()
     _record_heartbeat(
         worker_id, instance_id, process_started_at, WorkerProcessState.READY,
     )
+    run_maintenance = (
+        _last_maintenance_at is None
+        or (now - _last_maintenance_at).total_seconds() >= MAINTENANCE_INTERVAL_SECONDS
+    )
     with SessionLocal() as db:
         with db.begin():
-            recover_expired_leases(db, now=now)
-            expire_deadline_tasks(db, now=now)
+            if run_maintenance:
+                recover_expired_leases(db, now=now)
+                expire_deadline_tasks(db, now=now)
+                _last_maintenance_at = now
             claimed = claim_next_task(
                 db, worker_id=worker_id, instance_id=instance_id,
                 lease_seconds=max(MIN_LEASE_SECONDS, int(settings.WORKER_TASK_LEASE_SECONDS)),
+                heartbeat_timeout_seconds=int(settings.WORKER_HEARTBEAT_TIMEOUT_SECONDS),
                 now=now,
             )
             if claimed is None:
