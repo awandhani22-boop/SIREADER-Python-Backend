@@ -223,7 +223,8 @@ def _require_fresh_worker_heartbeat(db: Session, worker_id: str, instance_id: st
 
 
 def claim_next_task(db: Session, *, worker_id: str, instance_id: str,
-                    lease_seconds: int = 45, heartbeat_timeout_seconds: int = HEARTBEAT_TIMEOUT_SECONDS,\n                    now: datetime | None = None) -> tuple[WorkTaskRecord, WorkTaskAttemptRecord] | None:
+                    lease_seconds: int = 45, heartbeat_timeout_seconds: int = HEARTBEAT_TIMEOUT_SECONDS,
+                    now: datetime | None = None) -> tuple[WorkTaskRecord, WorkTaskAttemptRecord] | None:
     """Atomically claim the highest effective-priority compatible task for one worker."""
     if not 5 <= int(lease_seconds) <= MAX_LEASE_SECONDS:
         raise ValueError("lease_seconds must be between 5 and 600")
