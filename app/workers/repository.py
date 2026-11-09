@@ -319,15 +319,18 @@ def start_task(db: Session, *, task_id: str, lease_token: str, now: datetime | N
     return task
 
 
-def mark_provider_requested(db: Session, *, task_id: str, lease_token: str, now: datetime | None = None) -> WorkTaskAttemptRecord:
+def mark_provider_requested(db: Session, *, task_id: str, lease_token: str, provider_request_id: str | None = None, now: datetime | None = None) -> WorkTaskAttemptRecord:
     task, attempt = _locked_task_attempt(db, task_id, lease_token, now)
     if task.status != TaskStatus.RUNNING.value or attempt.status != AttemptStatus.STARTED.value:
         raise LeaseConflictError("task must be RUNNING before provider request")
     stamp = _now(now)
+    stable_provider_request_id = provider_request_id or attempt.attempt_id
+    if not isinstance(stable_provider_request_id, str) or not stable_provider_request_id or len(stable_provider_request_id) > 64:
+        raise ValueError("provider_request_id must contain 1..64 characters")
     attempt.status = AttemptStatus.PROVIDER_REQUESTED.value
-    attempt.provider_request_id = attempt.attempt_id
+    attempt.provider_request_id = stable_provider_request_id
     attempt.provider_started_at = stamp
-    _append_event(db, event_type=ActivityEventType.PROVIDER_REQUESTED, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, payload={"provider_request_id": attempt.attempt_id}, occurred_at=stamp)
+    _append_event(db, event_type=ActivityEventType.PROVIDER_REQUESTED, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, payload={"provider_request_id": stable_provider_request_id}, occurred_at=stamp)
     db.flush()
     return attempt
 
