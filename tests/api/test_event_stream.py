@@ -11,6 +11,7 @@ from app.api.event_stream import (
     EventStreamUnavailable,
     SubscriberLimitReached,
     validate_trigger_inventory,
+    validate_workforce_trigger_inventory,
 )
 from app.api.server import create_app
 from app.api.routes import events as events_route
@@ -33,6 +34,19 @@ def test_listener_readiness_requires_all_six_safe_trigger_pairs():
         validate_trigger_inventory(6, 6, 1, 0)
     with pytest.raises(RuntimeError):
         validate_trigger_inventory(6, 6, 0, 1)
+
+
+
+def test_listener_readiness_requires_all_seven_safe_workforce_trigger_pairs():
+    validate_workforce_trigger_inventory(7, 7, 0, 0)
+    with pytest.raises(RuntimeError):
+        validate_workforce_trigger_inventory(0, 0, 0, 0)
+    with pytest.raises(RuntimeError):
+        validate_workforce_trigger_inventory(7, 6, 0, 0)
+    with pytest.raises(RuntimeError):
+        validate_workforce_trigger_inventory(7, 7, 1, 0)
+    with pytest.raises(RuntimeError):
+        validate_workforce_trigger_inventory(7, 7, 0, 1)
 
 
 def test_event_envelope_contains_only_allowlisted_resource_metadata():
