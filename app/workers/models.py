@@ -160,7 +160,6 @@ class WorkforceCommandAuditRecord(Base):
             name="ck_workforce_command_type",
         ),
         CheckConstraint("length(request_fingerprint) = 64", name="ck_workforce_command_fingerprint"),
-        CheckConstraint("jsonb_typeof(outcome) = 'object'", name="ck_workforce_command_outcome"),
         Index("ix_workforce_command_audit_created", "created_at"),
         Index("ix_workforce_command_audit_correlation", "correlation_id"),
     )

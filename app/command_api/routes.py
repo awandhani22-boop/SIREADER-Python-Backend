@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from hashlib import sha256
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -175,6 +176,13 @@ def _idempotency_key(value: str | None) -> str:
     return value
 
 
+def _task_idempotency_key(command_key: str) -> str:
+    # Namespace queue keys so a public operator key cannot collide with an
+    # older Phase 4 task idempotency key or another internal producer.
+    digest = sha256(("phase5-command:" + command_key).encode("ascii")).hexdigest()
+    return "cmd5-" + digest
+
+
 def _eligible_task(task: WorkTaskRecord) -> None:
     if task.required_capability not in NON_TRADING_CAPABILITIES or task.task_type not in ALLOWED_TASK_TYPES:
         raise HTTPException(status_code=403, detail="TASK_NOT_ELIGIBLE_FOR_OPERATOR_COMMANDS")
@@ -196,7 +204,7 @@ def enqueue_non_trading_task(
             title=request.title,
             required_capability=request.required_capability,
             input_payload=request.input_payload,
-            idempotency_key=key,
+            idempotency_key=_task_idempotency_key(key),
             priority=request.priority,
             correlation_id=correlation_id,
             requested_worker_id=request.requested_worker_id,
@@ -278,7 +286,7 @@ def retry_failed_non_trading_task(
             title=("Retry: " + original.title)[:180],
             required_capability=original.required_capability,
             input_payload=dict(original.input_payload),
-            idempotency_key=key,
+            idempotency_key=_task_idempotency_key(key),
             priority=original.priority,
             correlation_id=original.correlation_id,
             requested_worker_id=original.requested_worker_id,

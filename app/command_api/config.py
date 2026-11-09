@@ -1,5 +1,6 @@
 """Fail-closed configuration for the isolated workforce command API."""
 import os
+import re
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
@@ -33,8 +34,8 @@ class WorkforceCommandSettings(BaseSettings):
         token = self.SIREADER_WORKFORCE_COMMAND_AUTH_TOKEN
         if not token or len(token) < 32 or len(token) > 256:
             raise RuntimeError("SIREADER_WORKFORCE_COMMAND_AUTH_TOKEN must contain 32..256 characters.")
-        if not all(ch.isalnum() or ch in "._~+/-=" for ch in token):
-            raise RuntimeError("Workforce command token contains unsupported characters.")
+        if not re.fullmatch(r"[A-Za-z0-9._~+/-]{32,256}", token):
+            raise RuntimeError("Workforce command token must use 32..256 ASCII URL-safe characters.")
         read_only_token = os.getenv("SIREADER_API_AUTH_TOKEN", "").strip()
         if read_only_token and token == read_only_token:
             raise RuntimeError("Workforce command token must be distinct from the read-only API token.")
