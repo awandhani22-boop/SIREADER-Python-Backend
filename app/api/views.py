@@ -184,3 +184,23 @@ v_api_workforce_runtime = Table(
     Column("dead_lettered_tasks", Integer, nullable=False),
     Column("completed_last_24h", Integer, nullable=False),
 )
+
+v_api_workforce_task_reviews = Table(
+    "v_api_workforce_task_reviews", metadata,
+    Column("review_id", String(64), primary_key=True),
+    Column("task_id", String(64), nullable=False),
+    Column("attempt_id", String(64), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("original_output_sha256", String(64), nullable=False),
+    Column("adjusted_output_sha256", String(64), nullable=True),
+    Column("adjudicated_by", String(128), nullable=True),
+    Column("adjudicated_at", DateTime(timezone=True), nullable=True),
+    Column("reason_code", String(48), nullable=True),
+    Column("notes", String(500), nullable=True),
+    Column("review_expires_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("original_output", JSON, nullable=True),
+    Column("adjusted_output", JSON, nullable=True),
+    Column("payload_purged_at", DateTime(timezone=True), nullable=True),
+)

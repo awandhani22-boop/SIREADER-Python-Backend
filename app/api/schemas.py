@@ -1,6 +1,7 @@
 """Pydantic response DTOs untuk Read-Only Observability API."""
 from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
 from typing import Dict, List, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -317,3 +318,43 @@ class WorkforceTaskTimelineResponse(BaseModel):
     limit: int = Field(ge=1, le=200)
     offset: int = Field(ge=0)
     events: List[WorkforceTimelineEventDTO]
+
+
+class WorkforceReviewStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    EDITED = "EDITED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+
+
+class WorkforceTaskReviewSummaryDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    review_id: str
+    task_id: str
+    attempt_id: str
+    status: WorkforceReviewStatus
+    original_output_sha256: str
+    adjusted_output_sha256: str | None = None
+    adjudicated_by: str | None = None
+    adjudicated_at: datetime | None = None
+    reason_code: str | None = None
+    notes: str | None = None
+    review_expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    payload_purged_at: datetime | None = None
+
+
+class WorkforceTaskReviewDetailDTO(WorkforceTaskReviewSummaryDTO):
+    original_output: dict | None = None
+    adjusted_output: dict | None = None
+
+
+class WorkforceTaskReviewsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    server_time_utc: datetime
+    total_count: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+    reviews: List[WorkforceTaskReviewSummaryDTO]

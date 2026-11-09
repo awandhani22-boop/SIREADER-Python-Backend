@@ -25,6 +25,7 @@ from app.api.routes import (
     telemetry_router,
     events_router,
     workforce_router,
+    governance_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -610,6 +611,7 @@ def create_app(*, manage_database_lifecycle: bool = True) -> FastAPI:
         audit_router,
         events_router,
         workforce_router,
+        governance_router,
     ):
         app.include_router(route, dependencies=[Depends(verify_bearer_token)])
     return app
