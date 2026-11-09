@@ -507,52 +507,132 @@ def test_workforce_command_role_has_only_the_declared_command_boundary(postgres_
     from sqlalchemy.orm import Session as OrmSession
     from app.command_api.database import validate_command_database_security
 
+    trading_task_id = "ci-trading-task-rls-0001"
+    safe_task_id = "ci-safe-task-rls-0001"
+    trading_attempt_id = "ci-trading-attempt-rls-0001"
     with postgres_security_engine.connect() as connection:
         with connection.begin():
+            # Seed a non-trading task and a trading-adjacent task as the DB owner
+            # before switching to the restricted command login.
+            connection.exec_driver_sql(
+                """
+                INSERT INTO public.workforce_tasks
+                    (task_id, idempotency_key, correlation_id, task_type, title,
+                     required_capability, requested_worker_id, status, input_payload)
+                VALUES
+                    ('ci-trading-task-rls-0001', 'ci-trading-key-rls-0001',
+                     'ci-trading-correlation-0001', 'RULE_VALIDATION',
+                     'Trading-adjacent rule fixture', 'rule_validation',
+                     'decision_engineer', 'FAILED', '{}'::jsonb),
+                    ('ci-safe-task-rls-0001', 'ci-safe-key-rls-0001',
+                     'ci-safe-correlation-0001', 'SUMMARIZATION',
+                     'Safe non-trading fixture', 'summarization',
+                     'haiku', 'FAILED', '{}'::jsonb)
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO public.workforce_task_attempts
+                    (attempt_id, task_id, attempt_number, worker_id, lease_token, status)
+                VALUES
+                    ('ci-trading-attempt-rls-0001', 'ci-trading-task-rls-0001',
+                     1, 'decision_engineer', 'ci-trading-lease-rls-0001', 'FAILED')
+                """
+            )
+
             connection.exec_driver_sql("SET LOCAL ROLE sireader_workforce_cmd")
             with OrmSession(bind=connection, join_transaction_mode="create_savepoint") as session:
                 validate_command_database_security(session)
 
-            # Narrow scheduling UPDATE is allowed; worker definition/enablement
-            # and heartbeat rows remain outside the command role.
+            # Only five general-purpose workers and non-trading capabilities/tasks
+            # are visible through the database role itself.
+            assert connection.exec_driver_sql(
+                "SELECT count(*) FROM public.workforce_workers"
+            ).scalar_one() == 5
+            assert connection.exec_driver_sql(
+                "SELECT count(*) FROM public.workforce_workers WHERE worker_id IN ('decision_engineer','market_monitor')"
+            ).scalar_one() == 0
+            assert connection.exec_driver_sql(
+                "SELECT count(*) FROM public.workforce_capabilities WHERE capability_id = 'rule_validation'"
+            ).scalar_one() == 0
+            assert connection.exec_driver_sql(
+                "SELECT count(*) FROM public.workforce_tasks WHERE task_id = 'ci-trading-task-rls-0001'"
+            ).scalar_one() == 0
+            assert connection.exec_driver_sql(
+                "SELECT count(*) FROM public.workforce_task_attempts WHERE attempt_id = 'ci-trading-attempt-rls-0001'"
+            ).scalar_one() == 0
+            assert connection.exec_driver_sql(
+                "SELECT count(*) FROM public.workforce_tasks WHERE task_id = 'ci-safe-task-rls-0001'"
+            ).scalar_one() == 1
+
+            # Scheduling writes are permitted for Haiku but silently cannot
+            # affect Decision Engineer or Market Monitor rows.
+            assert connection.exec_driver_sql(
+                "UPDATE public.workforce_workers SET accepting_tasks = false WHERE worker_id = 'haiku'"
+            ).rowcount == 1
+            assert connection.exec_driver_sql(
+                "UPDATE public.workforce_workers SET accepting_tasks = false WHERE worker_id = 'decision_engineer'"
+            ).rowcount == 0
+
+            # Task/attempt UPDATE grants are still row-scoped by RLS.
+            assert connection.exec_driver_sql(
+                "UPDATE public.workforce_tasks SET status = 'CANCELLED' WHERE task_id = 'ci-trading-task-rls-0001'"
+            ).rowcount == 0
+            assert connection.exec_driver_sql(
+                "UPDATE public.workforce_task_attempts SET status = 'CANCELLED' "
+                "WHERE attempt_id = 'ci-trading-attempt-rls-0001'"
+            ).rowcount == 0
+
+            # Direct SQL cannot INSERT a trading-adjacent workforce task/event.
+            with pytest.raises(DBAPIError):
+                with connection.begin_nested():
+                    connection.exec_driver_sql(
+                        """
+                        INSERT INTO public.workforce_tasks
+                            (task_id, idempotency_key, correlation_id, task_type, title,
+                             required_capability, requested_worker_id, status, input_payload)
+                        VALUES ('ci-trading-insert-rls-0001', 'ci-trading-insert-key-0001',
+                                'ci-trading-insert-correlation-0001', 'RULE_VALIDATION',
+                                'Must fail RLS', 'rule_validation', 'decision_engineer',
+                                'QUEUED', '{}'::jsonb)
+                        """
+                    )
+            with pytest.raises(DBAPIError):
+                with connection.begin_nested():
+                    connection.exec_driver_sql(
+                        """
+                        INSERT INTO public.workforce_activity_events
+                            (event_id, event_type, occurred_at, worker_id, correlation_id, payload)
+                        VALUES ('ci-trading-event-rls-0001', 'WORKER_STATE_CHANGED',
+                                now(), 'decision_engineer', 'ci-trading-event-correlation-0001', '{}'::jsonb)
+                        """
+                    )
+
+            # Audit append is permitted; direct mutation remains denied by
+            # both privileges and the database trigger.
             connection.exec_driver_sql(
-                "UPDATE public.workforce_workers SET accepting_tasks = false "
-                "WHERE worker_id = 'haiku'"
+                """
+                INSERT INTO public.workforce_command_audit
+                    (command_id, actor_id, command_type, target_id, idempotency_key,
+                     request_fingerprint, correlation_id, outcome, created_at)
+                VALUES ('ci-command-audit-0001', 'local_operator', 'WORKER_SCHEDULING_SET',
+                        'haiku', 'ci-command-key-0001', repeat('a', 64),
+                        'ci-command-correlation-0001', '{}'::jsonb, now())
+                """
             )
-
-            for statement in (
-                "UPDATE public.workforce_workers SET enabled = false WHERE worker_id = 'haiku'",
-                "SELECT * FROM public.workforce_heartbeats LIMIT 1",
-                "SELECT * FROM public.approval_decisions LIMIT 1",
-                "SELECT * FROM public.ai_analysis_logs LIMIT 1",
-                "INSERT INTO public.workforce_command_audit "
-                "(command_id, actor_id, command_type, target_id, idempotency_key, "
-                "request_fingerprint, correlation_id, outcome, created_at) "
-                "VALUES ('ci-command-audit-0001', 'local_operator', 'WORKER_SCHEDULING_SET', "
-                "'haiku', 'ci-command-key-0001', repeat('a', 64), "
-                "'ci-command-correlation-0001', '{}'::jsonb, now())",
-            ):
-                # Each rejected statement runs inside its own savepoint so the
-                # verification transaction remains usable afterwards.
-                if statement.startswith("INSERT INTO public.workforce_command_audit"):
-                    with connection.begin_nested():
-                        connection.exec_driver_sql(statement)
-                    # Audit INSERT is explicitly allowed.
-                else:
-                    with pytest.raises(DBAPIError):
-                        with connection.begin_nested():
-                            connection.exec_driver_sql(statement)
-
             for statement in (
                 "UPDATE public.workforce_command_audit SET outcome = '{}'::jsonb "
                 "WHERE command_id = 'ci-command-audit-0001'",
                 "DELETE FROM public.workforce_command_audit "
                 "WHERE command_id = 'ci-command-audit-0001'",
+                "SELECT * FROM public.workforce_heartbeats LIMIT 1",
+                "SELECT * FROM public.approval_decisions LIMIT 1",
+                "SELECT * FROM public.ai_analysis_logs LIMIT 1",
+                "UPDATE public.workforce_workers SET enabled = false WHERE worker_id = 'haiku'",
             ):
                 with pytest.raises(DBAPIError):
                     with connection.begin_nested():
                         connection.exec_driver_sql(statement)
-
             assert connection.exec_driver_sql(
                 "SELECT count(*) FROM public.workforce_command_audit"
             ).scalar_one() == 1
