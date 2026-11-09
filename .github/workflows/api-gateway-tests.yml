@@ -5,6 +5,7 @@ on:
     branches:
       - phase-3-1-api-gateway
       - phase-3-3-sse-implementation
+      - phase-4-implementation
   pull_request:
     branches:
       - main
@@ -62,7 +63,7 @@ jobs:
 
       - name: Compile API package
         run: |
-          python -m compileall -q app/api
+          python -m compileall -q app/api app/workers
 
       - name: Run core regression tests
         env:
