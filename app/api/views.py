@@ -33,6 +33,23 @@ v_api_telemetry_usage = Table(
     Column("completed_at", DateTime(timezone=True), nullable=True),
 )
 
+v_api_workforce_ai_usage = Table(
+    "v_api_workforce_ai_usage", metadata,
+    Column("usage_date", Date, nullable=False),
+    Column("worker_id", String(64), nullable=False),
+    Column("task_id", String(64), nullable=False),
+    Column("attempt_id", String(64), nullable=False),
+    Column("provider", String(50), nullable=False),
+    Column("model", String(255), nullable=False),
+    Column("tier", String(30), nullable=False),
+    Column("billing_currency", String(3), nullable=False),
+    Column("cost_rp", Numeric(18, 6), nullable=False),
+    Column("reserved_rp", Numeric(18, 6), nullable=False),
+    Column("cost_usd", Numeric(18, 6), nullable=False),
+    Column("reserved_usd", Numeric(18, 6), nullable=False),
+    Column("status", String(20), nullable=False),
+)
+
 v_api_active_in_flight_tasks = Table(
     "v_api_active_in_flight_tasks", metadata,
     Column("task_id", Integer, primary_key=True),

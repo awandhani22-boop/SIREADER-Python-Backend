@@ -28,6 +28,7 @@ from app.api.views import (
     v_api_telemetry_usage,
     v_api_workforce_runtime,
     v_api_workforce_workers,
+    v_api_workforce_ai_usage,
 )
 
 SECRET = "test-only-api-secret"
@@ -211,6 +212,60 @@ def test_telemetry_separates_currencies_for_totals_reservations_and_models(api_c
     assert Decimal(models["haiku-test"]["reserved"]) == Decimal("200")
     assert Decimal(models["sonnet-test"]["cost"]) == Decimal("0.5")
     assert Decimal(models["sonnet-test"]["reserved"]) == Decimal("0.2")
+
+
+def test_telemetry_budget_observability_preserves_currency_and_links_workforce_costs(api_client):
+    client, sessions = api_client
+    from app.config import settings
+
+    today = date.today()
+    month_start = today - timedelta(days=int(settings.AI_BUDGET_PERIOD_DAYS) - 1)
+    common = {
+        "usage_date": today,
+        "provider": "tokenmurah",
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "thinking_tokens": 0,
+        "created_at": NOW,
+        "completed_at": NOW,
+    }
+    with sessions.begin() as session:
+        session.execute(insert(v_api_telemetry_usage).values(
+            **common, model="haiku-test", tier="FAST", billing_currency="IDR",
+            cost_rp=Decimal("7000"), reserved_rp=Decimal("1000"),
+            cost_usd=Decimal("0"), reserved_usd=Decimal("0"), status="COMPLETED",
+        ))
+        session.execute(insert(v_api_telemetry_usage).values(
+            **common, model="anthropic-haiku", tier="FAST", billing_currency="USD",
+            cost_rp=Decimal("0"), reserved_rp=Decimal("0"),
+            cost_usd=Decimal("3.50"), reserved_usd=Decimal("0.50"), status="RESERVED",
+        ))
+        session.execute(insert(v_api_workforce_ai_usage).values(
+            usage_date=today, worker_id="haiku", task_id="task_12345678",
+            attempt_id="attempt_12345678", provider="tokenmurah",
+            model="haiku-test", tier="FAST", billing_currency="IDR",
+            cost_rp=Decimal("7000"), reserved_rp=Decimal("1000"),
+            cost_usd=Decimal("0"), reserved_usd=Decimal("0"), status="COMPLETED",
+        ))
+    response = client.get("/api/v1/telemetry/usage", headers=_headers())
+    assert response.status_code == 200
+    budget = response.json()["budget"]
+    assert budget["daily_idr"]["currency"] == "IDR"
+    assert Decimal(budget["daily_idr"]["actual_cost"]) == Decimal("7000")
+    assert Decimal(budget["daily_idr"]["reserved_cost"]) == Decimal("1000")
+    assert Decimal(budget["daily_idr"]["budget_amount"]) == Decimal(str(settings.AI_TARGET_DAILY_BUDGET_RP))
+    assert Decimal(budget["daily_idr"]["hard_limit_amount"]) == Decimal(str(settings.AI_HARD_DAILY_LIMIT_RP))
+    assert budget["daily_idr"]["warning_level"] == "SOFT"
+    assert Decimal(budget["monthly_anthropic_usd"]["projected_cost"]) == Decimal("4.00")
+    assert budget["monthly_anthropic_usd"]["warning_level"] == "SOFT"
+    tiers = {item["tier"]: item for item in budget["idr_tiers"]}
+    assert Decimal(tiers["FAST"]["projected_cost"]) == Decimal("8000")
+    assert tiers["FAST"]["budget_reached"] is False
+    assert budget["worker_breakdown"][0]["worker_id"] == "haiku"
+    assert budget["recent_task_costs"][0]["task_id"] == "task_12345678"
+    assert budget["recent_task_costs"][0]["worker_id"] == "haiku"
 
 
 def test_telemetry_rejects_unknown_currency(api_client):

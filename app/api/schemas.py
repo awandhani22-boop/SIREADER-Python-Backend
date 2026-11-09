@@ -57,12 +57,78 @@ class ModelTelemetryDTO(BaseModel):
     tokens: TokenBreakdownDTO
 
 
+class BudgetWindowDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    currency: CurrencyCode
+    window: Literal["DAILY", "ROLLING_MONTH", "MONTHLY"]
+    period_start: date
+    period_end: date
+    budget_amount: Decimal
+    hard_limit_amount: Decimal | None = None
+    actual_cost: Decimal
+    reserved_cost: Decimal
+    projected_cost: Decimal
+    remaining_budget: Decimal
+    remaining_hard_limit: Decimal | None = None
+    percent_used: Decimal
+    warning_threshold_percent: int | None = Field(default=None, ge=1, le=100)
+    warning_level: Literal["NONE", "SOFT", "WARNING", "CRITICAL", "HARD_LIMIT"]
+    status_counts: Dict[str, int] = Field(default_factory=dict)
+
+
+class BudgetTierDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tier: Literal["FAST", "REASONING", "ESCALATION"]
+    currency: CurrencyCode
+    budget_amount: Decimal
+    actual_cost: Decimal
+    reserved_cost: Decimal
+    projected_cost: Decimal
+    remaining_budget: Decimal
+    percent_used: Decimal
+    budget_reached: bool
+
+
+class WorkerCostBreakdownDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    worker_id: str
+    currency: CurrencyCode
+    actual_cost: Decimal
+    reserved_cost: Decimal
+    projected_cost: Decimal
+    requests: int
+
+
+class TaskCostBreakdownDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_id: str
+    worker_id: str
+    tier: str
+    model: str
+    currency: CurrencyCode
+    actual_cost: Decimal
+    reserved_cost: Decimal
+    projected_cost: Decimal
+    requests: int
+
+
+class BudgetObservabilityDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    daily_idr: BudgetWindowDTO
+    rolling_month_idr: BudgetWindowDTO
+    monthly_anthropic_usd: BudgetWindowDTO
+    idr_tiers: List[BudgetTierDTO]
+    worker_breakdown: List[WorkerCostBreakdownDTO]
+    recent_task_costs: List[TaskCostBreakdownDTO]
+
+
 class TelemetryUsageResponse(BaseModel):
     period_start: date
     period_end: date
     period_days: int
     currencies: List[CurrencyTelemetryDTO]
     models: List[ModelTelemetryDTO]
+    budget: BudgetObservabilityDTO
 
 
 class InFlightAnalysisDTO(BaseModel):
