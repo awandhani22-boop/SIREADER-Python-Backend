@@ -124,3 +124,137 @@ class AuditDecisionsResponse(BaseModel):
     total_returned: int
     offset: int
     decisions: List[AuditDecisionItemDTO]
+
+
+# Phase 4.4 workforce read-only DTOs. Never include task input/result or provider IDs.
+WorkforceProcessStatus = Literal[
+    "STARTING", "READY", "DRAINING", "STOPPED", "FAILED",
+    "STALE", "OFFLINE", "DISABLED",
+]
+WorkforceTaskStatus = Literal[
+    "QUEUED", "CLAIMED", "RUNNING", "RETRY_WAIT", "WAITING_REVIEW",
+    "COMPLETED", "FAILED", "CANCELLED", "DEAD_LETTERED",
+]
+WorkforceAttemptStatus = Literal[
+    "CLAIMED", "STARTED", "PROVIDER_REQUESTED", "COMPLETED",
+    "FAILED", "TIMED_OUT", "UNKNOWN", "CANCELLED",
+]
+WorkforceActivityType = Literal[
+    "TASK_ENQUEUED", "TASK_CLAIMED", "TASK_STARTED", "PROVIDER_REQUESTED",
+    "TASK_RETRIED", "TASK_COMPLETED", "TASK_FAILED", "TASK_CANCELLED",
+    "TASK_WAITING_REVIEW", "TASK_DEAD_LETTERED", "WORKER_HEARTBEAT",
+    "WORKER_STATE_CHANGED",
+]
+
+
+class WorkforceWorkerDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    worker_id: str = Field(min_length=2, max_length=64)
+    display_name: str
+    role: str
+    department: str
+    enabled: bool
+    max_concurrency: int = Field(ge=1, le=32)
+    model_tier: Literal["NONE", "FAST", "REASONING", "ESCALATION"]
+    process_status: WorkforceProcessStatus
+    heartbeat_at: datetime | None = None
+    active_task_count: int = Field(ge=0)
+    in_flight_provider_requests: int = Field(ge=0)
+    schema_version: Literal[1] = 1
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkforceRuntimeDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    observed_at: datetime
+    configured_workers: int = Field(ge=0)
+    ready_workers: int = Field(ge=0)
+    stale_workers: int = Field(ge=0)
+    offline_workers: int = Field(ge=0)
+    active_tasks: int = Field(ge=0)
+    queued_tasks: int = Field(ge=0)
+    waiting_review_tasks: int = Field(ge=0)
+    dead_lettered_tasks: int = Field(ge=0)
+    completed_last_24h: int = Field(ge=0)
+
+
+class WorkforceRuntimeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    server_time_utc: datetime
+    runtime: WorkforceRuntimeDTO
+    workers: List[WorkforceWorkerDTO]
+
+
+class WorkforceTaskDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_id: str
+    correlation_id: str
+    schema_version: Literal[1] = 1
+    task_type: str
+    title: str
+    required_capability: str
+    requested_worker_id: str | None = None
+    assigned_worker_id: str | None = None
+    priority: int = Field(ge=1, le=100)
+    status: WorkforceTaskStatus
+    attempts: int = Field(ge=0, le=100)
+    max_attempts: int = Field(ge=1, le=10)
+    not_before: datetime
+    deadline_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    failure_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+
+
+class WorkforceTasksResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    server_time_utc: datetime
+    total_count: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+    tasks: List[WorkforceTaskDTO]
+
+
+class WorkforceAttemptDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: str
+    task_id: str
+    attempt_number: int = Field(ge=1, le=10)
+    worker_id: str
+    status: WorkforceAttemptStatus
+    billing_currency: CurrencyCode | None = None
+    cost_amount: Decimal | None = Field(default=None, ge=0)
+    error_code: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+
+
+class WorkforceAttemptsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    server_time_utc: datetime
+    task_id: str
+    attempts: List[WorkforceAttemptDTO]
+
+
+class WorkforceActivityDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_id: str
+    event_type: WorkforceActivityType
+    occurred_at: datetime
+    worker_id: str | None = None
+    task_id: str | None = None
+    attempt_id: str | None = None
+    correlation_id: str
+
+
+class WorkforceActivityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    server_time_utc: datetime
+    total_count: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+    events: List[WorkforceActivityDTO]
