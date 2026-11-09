@@ -11,11 +11,12 @@ from app.workers.registry import build_default_registry
 from decimal import Decimal
 
 
-def _request(cancel=None):
+def _request(cancel=None, model_tier="FAST"):
     return WorkerExecutionRequest(
         task_id="task_12345678", task_type="SUMMARIZATION",
         title="Summarize a supplied document", input_payload={"text": "example"},
         correlation_id="corr_12345678", attempt_request_id="a" * 32,
+        model_tier=model_tier,
         cancellation=cancel,
     )
 
@@ -185,3 +186,13 @@ def test_provider_success_without_usage_is_unknown_and_not_retried(monkeypatch):
     assert error.value.code == "PROVIDER_USAGE_UNAVAILABLE"
     assert error.value.outcome_unknown is True
     assert error.value.retryable is False
+
+
+def test_live_provider_fails_closed_on_missing_or_mismatched_policy_tier(monkeypatch):
+    _configure_live_provider(monkeypatch)
+    monkeypatch.setattr(settings, "WORKER_MAX_TASK_COST_RP", Decimal("3.00"))
+    worker = build_default_registry()["haiku"]
+    for tier in ("NONE", "REASONING", "UNRECOGNIZED"):
+        with pytest.raises(WorkerProviderError) as error:
+            OmniRouteWorkerProvider().execute(worker, _request(model_tier=tier))
+        assert error.value.code == "MODEL_TIER_POLICY_REJECTED"

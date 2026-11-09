@@ -49,6 +49,8 @@ CAPABILITY_MODEL_TIERS = {
 PII_KEY_MARKERS = (
     "email", "phone", "mobile", "passport", "national_id",
     "personal_id", "identity_number", "date_of_birth", "home_address",
+    "address", "postal_code", "zip_code", "ssn", "social_security",
+    "tax_id", "full_name", "first_name", "last_name",
 )
 FORBIDDEN_EXECUTION_KEYS = frozenset({
     "place_order", "execute_trade", "order_execution", "broker_command",

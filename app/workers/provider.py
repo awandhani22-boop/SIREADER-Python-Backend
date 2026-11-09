@@ -92,9 +92,13 @@ class OmniRouteWorkerProvider:
             raise WorkerProviderError("WORKER_HAS_NO_MODEL_TIER", "This worker is not configured for model inference.")
         if not settings.AI_API_KEY or not settings.AI_BASE_URL:
             raise WorkerProviderError("PROVIDER_NOT_CONFIGURED", "Backend AI provider configuration is incomplete.")
-        selected_tier = request.model_tier if request.model_tier in {"FAST", "REASONING", "ESCALATION"} else worker.model_tier
-        if selected_tier == "NONE":
-            raise WorkerProviderError("MODEL_TIER_POLICY_REJECTED", "Workforce policy did not authorize a provider model tier.")
+        allowed_tiers = {"FAST", "REASONING", "ESCALATION"}
+        if request.model_tier not in allowed_tiers or request.model_tier != worker.model_tier:
+            raise WorkerProviderError(
+                "MODEL_TIER_POLICY_REJECTED",
+                "Workforce policy tier must be explicitly authorized and match the worker model ceiling.",
+            )
+        selected_tier = request.model_tier
         tier_config = get_tier_config(selected_tier)
         try:
             billing = resolve_billing(tier_config["model"])

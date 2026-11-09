@@ -1324,3 +1324,63 @@ def test_run_maintenance_once_orders_expiry_before_payload_purge(monkeypatch):
         "task_payloads_purged": 6,
         "review_payloads_purged": 7,
     }
+
+
+def test_workforce_policy_covers_every_general_provider_capability_and_task_pair():
+    from app.governance.review_policy import TRADING_RELATED_CAPABILITIES
+    from app.workers.policy import CAPABILITY_MODEL_TIERS, WORKER_TIER_CEILINGS
+
+    registry = build_default_registry()
+    for worker_id in ("haiku", "sonnet", "opus"):
+        worker = registry[worker_id]
+        for capability_id in worker.capability_ids:
+            contract = CAPABILITY_CATALOG[capability_id]
+            if capability_id in TRADING_RELATED_CAPABILITIES:
+                for task_type in contract.task_types:
+                    result = evaluate_workforce_policy(
+                        worker=worker, task_type=task_type,
+                        required_capability=capability_id, title="Policy matrix",
+                        input_payload={}, provider_mode="OMNIROUTE",
+                    )
+                    assert result.action is SensitiveTaskAction.REJECT
+                    assert result.reason_code == "TRADING_CAPABILITY_PROVIDER_FORBIDDEN"
+                continue
+
+            assert capability_id in CAPABILITY_MODEL_TIERS, (
+                f"Provider capability {worker_id}:{capability_id} lacks a model tier"
+            )
+            assert CAPABILITY_MODEL_TIERS[capability_id] == WORKER_TIER_CEILINGS[worker_id]
+            for task_type in contract.task_types:
+                result = evaluate_workforce_policy(
+                    worker=worker, task_type=task_type,
+                    required_capability=capability_id, title="Policy matrix",
+                    input_payload={}, provider_mode="OMNIROUTE",
+                )
+                assert result.action is SensitiveTaskAction.ALLOW
+                assert result.model_tier == worker.model_tier
+
+
+def test_workforce_policy_redacts_common_personal_identifiers():
+    registry = build_default_registry()
+    result = evaluate_workforce_policy(
+        worker=registry["sonnet"], task_type="DATA_ANALYSIS",
+        required_capability="data_analysis", title="Analyze a record",
+        input_payload={
+            "customer": {
+                "full_name": "Example Person",
+                "postal_code": "12345",
+                "tax_id": "TX-123-45",
+                "home_address": "Example Street",
+                "status": "active",
+            },
+        },
+        provider_mode="OMNIROUTE",
+    )
+    record = result.sanitized_input["customer"]
+    assert result.action is SensitiveTaskAction.REVIEW
+    assert record["full_name"] == "[REDACTED_PERSONAL_DATA]"
+    assert record["postal_code"] == "[REDACTED_PERSONAL_DATA]"
+    assert record["tax_id"] == "[REDACTED_PERSONAL_DATA]"
+    assert record["home_address"] == "[REDACTED_PERSONAL_DATA]"
+    assert record["status"] == "active"
+    assert result.redacted_fields == 4
