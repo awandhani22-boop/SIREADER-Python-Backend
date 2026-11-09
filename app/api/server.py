@@ -167,6 +167,7 @@ view_owner_columns(table_name, column_name) AS (
         ('workforce_workers', 'schema_version'),
         ('workforce_workers', 'created_at'),
         ('workforce_workers', 'updated_at'),
+        ('workforce_workers', 'accepting_tasks'),
         ('workforce_capabilities', 'capability_id'),
         ('workforce_capabilities', 'description'),
         ('workforce_capabilities', 'task_types'),

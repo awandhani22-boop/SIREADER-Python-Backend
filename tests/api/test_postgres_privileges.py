@@ -504,48 +504,54 @@ def test_postgres_privilege_audit_detects_public_table_and_column_grants(postgre
 
 
 def test_workforce_command_role_has_only_the_declared_command_boundary(postgres_security_engine):
-    psycopg_url = make_url(DATABASE_URL).set(drivername="postgresql").render_as_string(hide_password=False)
-    with psycopg.connect(psycopg_url, autocommit=True) as command:
-        command.execute("SET ROLE sireader_workforce_cmd")
-        command.execute("SELECT 1")
-        from sqlalchemy.orm import Session as OrmSession
-        from app.command_api.database import validate_command_database_security
-        with OrmSession(bind=command) as session:
-            validate_command_database_security(session)
+    from sqlalchemy.orm import Session as OrmSession
+    from app.command_api.database import validate_command_database_security
 
-        # Narrow scheduling UPDATE is allowed; definition/enablement changes are not.
-        command.execute(
-            "UPDATE public.workforce_workers SET accepting_tasks = false "
-            "WHERE worker_id = 'haiku'"
-        )
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            command.execute(
-                "UPDATE public.workforce_workers SET enabled = false WHERE worker_id = 'haiku'"
+    with postgres_security_engine.connect() as connection:
+        with connection.begin():
+            connection.exec_driver_sql("SET LOCAL ROLE sireader_workforce_cmd")
+            with OrmSession(bind=connection, join_transaction_mode="create_savepoint") as session:
+                validate_command_database_security(session)
+
+            # Narrow scheduling UPDATE is allowed; worker definition/enablement
+            # and heartbeat rows remain outside the command role.
+            connection.exec_driver_sql(
+                "UPDATE public.workforce_workers SET accepting_tasks = false "
+                "WHERE worker_id = 'haiku'"
             )
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            command.execute("SELECT * FROM public.workforce_heartbeats LIMIT 1")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            command.execute("SELECT * FROM public.approval_decisions LIMIT 1")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            command.execute("SELECT * FROM public.ai_analysis_logs LIMIT 1")
 
-        command.execute(
-            """
-            INSERT INTO public.workforce_command_audit
-            (command_id, actor_id, command_type, target_id, idempotency_key,
-             request_fingerprint, correlation_id, outcome, created_at)
-            VALUES ('ci-command-audit-0001', 'local_operator', 'WORKER_SCHEDULING_SET',
-                    'haiku', 'ci-command-key-0001', repeat('a', 64), 'ci-command-correlation-0001',
-                    '{}'::jsonb, now())
-            """
-        )
-        with pytest.raises(psycopg.Error):
-            command.execute(
+            for statement in (
+                "UPDATE public.workforce_workers SET enabled = false WHERE worker_id = 'haiku'",
+                "SELECT * FROM public.workforce_heartbeats LIMIT 1",
+                "SELECT * FROM public.approval_decisions LIMIT 1",
+                "SELECT * FROM public.ai_analysis_logs LIMIT 1",
+                "INSERT INTO public.workforce_command_audit "
+                "(command_id, actor_id, command_type, target_id, idempotency_key, "
+                "request_fingerprint, correlation_id, outcome, created_at) "
+                "VALUES ('ci-command-audit-0001', 'local_operator', 'WORKER_SCHEDULING_SET', "
+                "'haiku', 'ci-command-key-0001', repeat('a', 64), "
+                "'ci-command-correlation-0001', '{}'::jsonb, now())",
+            ):
+                # Each rejected statement runs inside its own savepoint so the
+                # verification transaction remains usable afterwards.
+                with connection.begin_nested():
+                    if statement.startswith("INSERT INTO public.workforce_command_audit"):
+                        connection.exec_driver_sql(statement)
+                        # Audit INSERT is explicitly allowed.
+                    else:
+                        with pytest.raises(DBAPIError):
+                            connection.exec_driver_sql(statement)
+
+            for statement in (
                 "UPDATE public.workforce_command_audit SET outcome = '{}'::jsonb "
-                "WHERE command_id = 'ci-command-audit-0001'"
-            )
-        with pytest.raises(psycopg.Error):
-            command.execute(
-                "DELETE FROM public.workforce_command_audit WHERE command_id = 'ci-command-audit-0001'"
-            )
+                "WHERE command_id = 'ci-command-audit-0001'",
+                "DELETE FROM public.workforce_command_audit "
+                "WHERE command_id = 'ci-command-audit-0001'",
+            ):
+                with connection.begin_nested():
+                    with pytest.raises(DBAPIError):
+                        connection.exec_driver_sql(statement)
 
+            assert connection.exec_driver_sql(
+                "SELECT count(*) FROM public.workforce_command_audit"
+            ).scalar_one() == 1

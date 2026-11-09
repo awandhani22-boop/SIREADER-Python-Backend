@@ -50,6 +50,26 @@ def test_workforce_migration_security_and_task_lifecycle():
         roles = {row[0] for row in admin.execute("SELECT rolname FROM pg_roles WHERE rolname IN ('sireader_view_owner', 'sireader_api_ro', 'sireader_workforce_cmd')")}
         if roles != {"sireader_view_owner", "sireader_api_ro", "sireader_workforce_cmd"}:
             pytest.skip("Run after the disposable PostgreSQL privilege fixture creates the approved roles.")
+
+        # This suite runs after another privilege suite in the same disposable
+        # database. Reset only workforce objects so Phase 4 view migrations are
+        # always tested from their actual pre-Phase-5 schema, not against a
+        # previously upgraded view with an extra accepting_tasks column.
+        for view_name in (
+            "v_api_workforce_runtime", "v_api_workforce_activity",
+            "v_api_workforce_attempts", "v_api_workforce_tasks",
+            "v_api_workforce_workers",
+        ):
+            admin.execute(f"DROP VIEW IF EXISTS public.{view_name} CASCADE")
+        for table_name in (
+            "workforce_command_audit", "workforce_activity_events",
+            "workforce_task_attempts", "workforce_tasks", "workforce_heartbeats",
+            "workforce_worker_capabilities", "workforce_capabilities", "workforce_workers",
+        ):
+            admin.execute(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
+        admin.execute("DROP FUNCTION IF EXISTS public.sireader_notify_workforce_v1() CASCADE")
+        admin.execute("DROP FUNCTION IF EXISTS public.sireader_reject_command_audit_mutation_v1() CASCADE")
+
         try:
             _run_migration(admin, root, migration_name)
             _run_migration(admin, root, migration_name)  # idempotency
