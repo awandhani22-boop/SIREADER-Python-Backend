@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Any, Callable
 
@@ -22,6 +23,37 @@ from app.workers.repository import (
 logger = logging.getLogger(__name__)
 
 
+def validate_maintenance_database_url(raw_url: str | None) -> None:
+    """Allow destructive retention maintenance only against a loopback PostgreSQL DB.
+
+    This intentionally blocks Supabase, production, and all remote database hosts.
+    Error messages never include the connection string or credentials.
+    """
+    if not raw_url or not raw_url.strip():
+        raise RuntimeError(
+            "DATABASE_URL is not configured; workforce maintenance is disabled."
+        )
+    try:
+        from sqlalchemy.engine import make_url
+        parsed = make_url(raw_url.strip())
+    except Exception as exc:
+        raise RuntimeError(
+            "DATABASE_URL could not be parsed; workforce maintenance is disabled."
+        ) from exc
+
+    driver = parsed.drivername.split("+", 1)[0].lower()
+    host = (parsed.host or "").strip("[]").lower()
+    if driver not in {"postgres", "postgresql"}:
+        raise RuntimeError(
+            "Workforce maintenance requires PostgreSQL on a local loopback host."
+        )
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        raise RuntimeError(
+            "Workforce maintenance is restricted to localhost/loopback PostgreSQL. "
+            "Remote, Supabase, and production databases are blocked."
+        )
+
+
 def run_maintenance_once(
     *,
     session_factory: Callable[[], Any] | None = None,
@@ -29,8 +61,11 @@ def run_maintenance_once(
 ) -> dict[str, int]:
     """Execute one transaction of recovery, expiry, and retention operations."""
     if session_factory is None:
-        # Importing the DB factory here keeps module import safe for API/test tooling.
-        # It uses DATABASE_URL only when the maintenance command is actually invoked.
+        # Match the main connection module's .env loading semantics, then fail closed
+        # before importing/creating the engine if the target is not loopback PostgreSQL.
+        from dotenv import load_dotenv
+        load_dotenv(encoding="utf-8-sig", override=False)
+        validate_maintenance_database_url(os.getenv("DATABASE_URL"))
         from app.database.connection import SessionLocal
         session_factory = SessionLocal
 

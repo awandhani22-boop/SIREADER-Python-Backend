@@ -1457,6 +1457,30 @@ def test_sensitive_task_policy_forces_atomic_human_output_review(db_session: Ses
     assert complete_event.payload["policy_version"] == POLICY_VERSION
 
 
+
+
+def test_maintenance_database_guard_allows_loopback_postgres_only():
+    from app.workers.maintenance import validate_maintenance_database_url
+
+    validate_maintenance_database_url("postgresql+psycopg://user:private@127.0.0.1:5432/sireader")
+    validate_maintenance_database_url("postgresql://user:private@localhost:5432/sireader")
+    validate_maintenance_database_url("postgresql://user:private@[::1]:5432/sireader")
+
+
+@pytest.mark.parametrize("database_url", [
+    None,
+    "",
+    "sqlite:///./sireader.db",
+    "postgresql://user:private@db.example.com:5432/sireader",
+    "postgresql://user:private@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
+])
+def test_maintenance_database_guard_rejects_non_loopback_targets(database_url):
+    from app.workers.maintenance import validate_maintenance_database_url
+
+    with pytest.raises(RuntimeError, match="maintenance|loopback"):
+        validate_maintenance_database_url(database_url)
+
+
 def test_run_maintenance_once_orders_expiry_before_payload_purge(monkeypatch):
     from app.workers import maintenance
 
