@@ -127,6 +127,10 @@ def test_workforce_migration_security_and_task_lifecycle():
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_tasks").fetchone()[0] == 0
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_attempts").fetchone()[0] == 0
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_activity").fetchone()[0] == 0
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    api.execute("SELECT * FROM public.workforce_task_reviews")
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    api.execute("SELECT * FROM public.workforce_task_review_payloads")
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_task_reviews").fetchone()[0] == 0
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_ai_usage").fetchone()[0] == 0
 

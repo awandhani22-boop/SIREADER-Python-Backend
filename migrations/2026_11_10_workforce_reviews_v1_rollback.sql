@@ -2,6 +2,14 @@
 BEGIN;
 
 REVOKE ALL ON public.v_api_workforce_task_reviews FROM sireader_api_ro;
+REVOKE SELECT (
+    review_id, task_id, attempt_id, status, original_output_sha256,
+    adjusted_output_sha256, adjudicated_by, adjudicated_at, reason_code,
+    notes, review_expires_at, created_at, updated_at
+) ON public.workforce_task_reviews FROM sireader_view_owner;
+REVOKE SELECT (
+    review_id, original_output, adjusted_output, payload_purged_at
+) ON public.workforce_task_review_payloads FROM sireader_view_owner;
 REVOKE ALL ON public.workforce_task_reviews FROM sireader_workforce_cmd;
 REVOKE ALL ON public.workforce_task_review_payloads FROM sireader_workforce_cmd;
 

@@ -236,6 +236,18 @@ LEFT JOIN public.workforce_task_review_payloads p ON p.review_id = r.review_id;
 
 ALTER VIEW public.v_api_workforce_task_reviews OWNER TO sireader_view_owner;
 
+-- View owner receives only the columns projected by the security-barrier view.
+-- The browser API role still has no direct grants on either quarantine table.
+GRANT USAGE ON SCHEMA public TO sireader_view_owner;
+GRANT SELECT (
+    review_id, task_id, attempt_id, status, original_output_sha256,
+    adjusted_output_sha256, adjudicated_by, adjudicated_at, reason_code,
+    notes, review_expires_at, created_at, updated_at
+) ON public.workforce_task_reviews TO sireader_view_owner;
+GRANT SELECT (
+    review_id, original_output, adjusted_output, payload_purged_at
+) ON public.workforce_task_review_payloads TO sireader_view_owner;
+
 -- 7. Role Privileges & Access Boundaries
 REVOKE ALL ON public.workforce_task_reviews FROM public, sireader_api_ro;
 REVOKE ALL ON public.workforce_task_review_payloads FROM public, sireader_api_ro;
