@@ -107,7 +107,9 @@ Do not run concurrently with a manually started database migration. The routine 
 ## Verified implementation snapshot — 2026-11-10
 
 - Backend branch: `phase-5-implementation`.
-- Backend head at this snapshot: `1568435e092fc3b59bb271a9eef9d24981daa8e8`.
+- Backend policy/maintenance implementation commit: `1568435e092fc3b59bb271a9eef9d24981daa8e8`; documentation closeout branch HEAD: `6fc26d153f76a37b0fc6cecfd3e58faaa0955b39`.
 - [CI run 42671067597 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42671067597): 187 API tests passed, 76 core regression tests passed, compile step successful.
 - [Budget observability CI run 42667794174 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42667794174): 177 API tests and 75 core regression tests passed.
 - These checks use disposable test infrastructure. They do not deploy migrations to Supabase LIVE, start a paid provider, or register an OS-level maintenance task.
+
+- Documentation closeout [CI run 42671597785 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42671597785).
