@@ -75,4 +75,4 @@ jobs:
           TELEGRAM_API_HASH: "ci-test-placeholder"
           TELEGRAM_TARGET_CHAT_ID: "-1000000000000"
         run: |
-          pytest -q test_decision_engine.py test_decision_service.py
+          pytest -q test_decision_engine.py test_decision_service.py test_worker_runtime_contract.py test_worker_provider.py test_worker_runtime.py
