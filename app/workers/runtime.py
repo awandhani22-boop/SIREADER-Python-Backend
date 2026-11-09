@@ -175,8 +175,8 @@ def run_worker_once(
             if run_maintenance:
                 recover_expired_leases(db, now=now)
                 expire_deadline_tasks(db, now=now)
-                purge_expired_task_payloads(db, now=now)
                 expire_stale_reviews(db, now=now)
+                purge_expired_task_payloads(db, now=now)
                 purge_expired_review_payloads(db, now=now)
                 _last_maintenance_at = now
             claimed = claim_next_task(

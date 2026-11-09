@@ -97,6 +97,7 @@ def db_engine():
 
         # Always apply the review migration to ensure latest triggers and constraints are in place
         admin.execute((root / "migrations" / "2026_11_10_workforce_reviews_v1.sql").read_text(encoding="utf-8"))
+        admin.execute((root / "migrations" / "2026_11_10_workforce_review_payload_insert_guard_v2.sql").read_text(encoding="utf-8"))
 
     engine = create_engine(DATABASE_URL, echo=False)
     yield engine
@@ -906,6 +907,74 @@ def test_db_retention_purge_and_anti_resurrection(db_session: Session):
     db_session.rollback()
 
 
+
+
+def test_db_initial_review_payload_insert_rejects_adjusted_output(db_session: Session):
+    now = datetime.now(timezone.utc)
+    task_id = f"task_{uuid4().hex[:12]}"
+    attempt_id = f"att_{uuid4().hex[:12]}"
+    review_id = f"rev_{uuid4().hex[:12]}"
+
+    task = WorkTaskRecord(
+        task_id=task_id,
+        idempotency_key=f"idem_{uuid4().hex[:12]}",
+        correlation_id=f"corr_{uuid4().hex[:12]}",
+        task_type="EVALUATION",
+        title="Initial payload insert guard",
+        required_capability="evaluation",
+        status=TaskStatus.COMPLETED.value,
+        payload_expires_at=now + timedelta(days=30),
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(WorkTaskAttemptRecord(
+        attempt_id=attempt_id,
+        task_id=task_id,
+        attempt_number=1,
+        worker_id="sonnet",
+        lease_token=f"lt_{uuid4().hex[:12]}",
+        status=AttemptStatus.COMPLETED.value,
+    ))
+    db_session.flush()
+    db_session.add(WorkforceTaskReviewRecord(
+        review_id=review_id,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        status=ReviewStatus.PENDING.value,
+        original_output_sha256="e" * 64,
+        review_expires_at=now + timedelta(hours=24),
+    ))
+    db_session.commit()
+
+    # A command DB login can INSERT payload rows, but only the original quarantined
+    # result may exist at insertion time. It cannot pre-seed an edited result.
+    with pytest.raises(Exception, match="Initial review payload may contain only original_output"):
+        db_session.execute(
+            text(
+                "INSERT INTO public.workforce_task_review_payloads "
+                "(review_id, original_output, adjusted_output) "
+                "VALUES (:rid, '{\"original\": true}'::jsonb, '{\"forged_edit\": true}'::jsonb)"
+            ),
+            {"rid": review_id},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+    db_session.execute(
+        text(
+            "INSERT INTO public.workforce_task_review_payloads "
+            "(review_id, original_output, adjusted_output) "
+            "VALUES (:rid, '{\"original\": true}'::jsonb, NULL)"
+        ),
+        {"rid": review_id},
+    )
+    db_session.commit()
+    payload = db_session.get(WorkforceTaskReviewPayloadRecord, review_id)
+    assert payload is not None
+    assert payload.original_output == {"original": True}
+    assert payload.adjusted_output is None
+
+
 def test_db_adjusted_output_state_guard(db_session: Session):
     now = datetime.now(timezone.utc)
     task_id = f"task_{uuid4().hex[:12]}"
@@ -1086,8 +1155,11 @@ def test_migration_forward_rollback_forward_lifecycle():
     conn_url = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
     mig = (root / "migrations" / "2026_11_10_workforce_reviews_v1.sql").read_text(encoding="utf-8")
     rb = (root / "migrations" / "2026_11_10_workforce_reviews_v1_rollback.sql").read_text(encoding="utf-8")
+    mig_v2 = (root / "migrations" / "2026_11_10_workforce_review_payload_insert_guard_v2.sql").read_text(encoding="utf-8")
+    rb_v2 = (root / "migrations" / "2026_11_10_workforce_review_payload_insert_guard_v2_rollback.sql").read_text(encoding="utf-8")
 
     with psycopg.connect(conn_url, autocommit=True) as conn:
+        conn.execute(rb_v2)
         conn.execute(rb)
         exists = conn.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name = 'workforce_task_reviews'"
@@ -1095,6 +1167,19 @@ def test_migration_forward_rollback_forward_lifecycle():
         assert exists is None
 
         conn.execute(mig)
+        conn.execute(mig_v2)
+        trigger = conn.execute(
+            "SELECT pg_get_triggerdef(oid) FROM pg_trigger "
+            "WHERE tgname = 'trg_workforce_task_review_payloads_guard' AND NOT tgisinternal"
+        ).fetchone()
+        assert trigger is not None and "INSERT" in trigger[0].upper()
+        conn.execute(rb_v2)
+        reverted = conn.execute(
+            "SELECT pg_get_triggerdef(oid) FROM pg_trigger "
+            "WHERE tgname = 'trg_workforce_task_review_payloads_guard' AND NOT tgisinternal"
+        ).fetchone()
+        assert reverted is not None and "INSERT" not in reverted[0].upper()
+        conn.execute(mig_v2)
         recreated = conn.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name = 'workforce_task_reviews'"
         ).fetchone()
