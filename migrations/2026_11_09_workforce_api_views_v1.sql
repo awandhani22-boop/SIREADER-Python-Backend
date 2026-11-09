@@ -25,15 +25,6 @@ SELECT
     w.enabled,
     w.max_concurrency,
     w.model_tier,
-    COALESCE((
-        SELECT jsonb_agg(wc.capability_id ORDER BY wc.capability_id)
-        FROM public.workforce_worker_capabilities AS wc
-        JOIN public.workforce_capabilities AS c
-          ON c.capability_id = wc.capability_id
-        WHERE wc.worker_id = w.worker_id
-          AND wc.enabled
-          AND c.enabled
-    ), '[]'::jsonb) AS capability_ids,
     CASE
         WHEN NOT w.enabled THEN 'DISABLED'
         WHEN h.heartbeat_at IS NULL THEN 'OFFLINE'
@@ -47,7 +38,16 @@ SELECT
     COALESCE(h.in_flight_provider_requests, 0)::integer AS in_flight_provider_requests,
     w.schema_version,
     w.created_at,
-    w.updated_at
+    w.updated_at,
+    COALESCE((
+        SELECT jsonb_agg(wc.capability_id ORDER BY wc.capability_id)
+        FROM public.workforce_worker_capabilities AS wc
+        JOIN public.workforce_capabilities AS c
+          ON c.capability_id = wc.capability_id
+        WHERE wc.worker_id = w.worker_id
+          AND wc.enabled
+          AND c.enabled
+    ), '[]'::jsonb) AS capability_ids
 FROM public.workforce_workers AS w
 LEFT JOIN LATERAL (
     SELECT process_state, heartbeat_at, active_task_count, in_flight_provider_requests
