@@ -10,7 +10,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from app.workers.repository import (
-    cancel_task, claim_next_task, complete_task, enqueue_task,
+    cancel_task, claim_next_task, complete_task, enqueue_task, expire_deadline_tasks,
     heartbeat_worker, mark_provider_requested, recover_expired_leases,
     start_task, sync_default_registry,
 )
@@ -19,6 +19,7 @@ from app.workers.runtime_contract import (
     WorkerProcessState,
 )
 from app.workers.models import WorkActivityEventRecord, WorkTaskAttemptRecord, WorkTaskRecord
+from app.workers.repository import WorkerUnavailableError
 
 POSTGRES_URL = os.getenv("SIREADER_TEST_POSTGRES_URL")
 PSYCOPG_URL = (
@@ -100,6 +101,14 @@ def test_workforce_migration_security_and_task_lifecycle():
                         )
                         assert created
                         task_ids.append(row.task_id)
+                    deadline_row, deadline_created = enqueue_task(
+                        db, task_type="SUMMARIZATION", title="Deadline task",
+                        required_capability="summarization", input_payload={"index": 4},
+                        idempotency_key="phase4-deadline-004", priority=40,
+                        deadline_at=now + timedelta(seconds=30),
+                    )
+                    assert deadline_created
+                    task_ids.append(deadline_row.task_id)
 
             def claim_one(_index):
                 with Session() as db:
@@ -122,23 +131,26 @@ def test_workforce_migration_security_and_task_lifecycle():
                 with db.begin():
                     start_task(db, task_id=provider_task_id, lease_token=provider_lease, now=now + timedelta(seconds=1))
                     mark_provider_requested(db, task_id=provider_task_id, lease_token=provider_lease, now=now + timedelta(seconds=2))
-                    cancelled = cancel_task(db, task_id=provider_task_id, now=now + timedelta(seconds=3))
-                    assert cancelled.status == TaskStatus.WAITING_REVIEW.value
-            with Session() as db:
-                with db.begin():
-                    provider_attempt = db.get(WorkTaskAttemptRecord, provider_attempt_id)
-                    assert provider_attempt.status == AttemptStatus.UNKNOWN.value
 
-            # A claim that expires before provider dispatch is safe to retry after backoff.
+            # Both leases expire; only the pre-provider task is safe to retry.
             pre_task_id, pre_attempt_id, pre_lease = active[1]
             recovery_time = now + timedelta(minutes=2)
             with Session() as db:
                 with db.begin():
+                    provider_task = db.get(WorkTaskRecord, provider_task_id)
                     pre_task = db.get(WorkTaskRecord, pre_task_id)
+                    provider_task.lease_expires_at = now + timedelta(seconds=10)
                     pre_task.lease_expires_at = now + timedelta(seconds=10)
                     result = recover_expired_leases(db, now=recovery_time)
-                    assert result["requeued"] == 1
+                    assert result == {"requeued": 1, "waiting_review": 1, "dead_lettered": 0}
+                    assert provider_task.status == TaskStatus.WAITING_REVIEW.value
                     assert pre_task.status == TaskStatus.RETRY_WAIT.value
+                    assert expire_deadline_tasks(db, now=recovery_time) == 1
+
+            with Session() as db:
+                with db.begin():
+                    provider_attempt = db.get(WorkTaskAttemptRecord, provider_attempt_id)
+                    assert provider_attempt.status == AttemptStatus.UNKNOWN.value
 
             # Heartbeat is refreshed; retry is eligible after the bounded backoff.
             with Session() as db:
@@ -161,6 +173,23 @@ def test_workforce_migration_security_and_task_lifecycle():
                         result_payload={"source": "SIMULATED", "summary": "test completed"},
                         now=recovery_time + timedelta(minutes=1, seconds=1),
                     )
+
+            # A second claim without a matching fresh heartbeat is rejected; a real
+            # queued task can be claimed and cancelled before provider dispatch.
+            with Session() as db:
+                with db.begin():
+                    with pytest.raises(WorkerUnavailableError):
+                        claim_next_task(
+                            db, worker_id="haiku", instance_id="missing-instance",
+                            now=recovery_time + timedelta(minutes=1, seconds=2),
+                        )
+                    pending = claim_next_task(
+                        db, worker_id="haiku", instance_id="instance-haiku-123",
+                        now=recovery_time + timedelta(minutes=1, seconds=2),
+                    )
+                    assert pending is not None and pending[0].task_id == task_ids[2]
+                    cancelled = cancel_task(db, task_id=pending[0].task_id, now=recovery_time + timedelta(minutes=1, seconds=3))
+                    assert cancelled.status == TaskStatus.CANCELLED.value
 
             with Session() as db:
                 events = db.query(WorkActivityEventRecord).filter(WorkActivityEventRecord.task_id.in_(task_ids)).all()
