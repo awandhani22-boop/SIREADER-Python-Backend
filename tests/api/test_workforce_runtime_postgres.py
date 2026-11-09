@@ -56,7 +56,7 @@ def test_workforce_migration_security_and_task_lifecycle():
                   (SELECT count(*) FROM public.workforce_worker_capabilities)
                 """
             ).fetchone()
-            assert counts == (7, 28, 28)
+            assert counts == (7, 28, 29)
 
             # The browser-facing read-only role never gets direct workforce table access.
             with psycopg.connect(PSYCOPG_URL, autocommit=True) as api:
