@@ -1,5 +1,5 @@
 """SQLAlchemy Core mappings untuk enam PostgreSQL views yang disetujui."""
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, MetaData, Numeric, String, Table
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, JSON, MetaData, Numeric, String, Table
 
 metadata = MetaData()
 
@@ -89,6 +89,7 @@ v_api_workforce_workers = Table(
     Column("enabled", Boolean, nullable=False),
     Column("max_concurrency", Integer, nullable=False),
     Column("model_tier", String(20), nullable=False),
+    Column("capability_ids", JSON, nullable=False),
     Column("process_status", String(20), nullable=False),
     Column("heartbeat_at", DateTime(timezone=True), nullable=True),
     Column("active_task_count", Integer, nullable=False),
