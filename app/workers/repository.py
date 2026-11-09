@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.workers.models import (
     WorkActivityEventRecord, WorkTaskAttemptRecord, WorkTaskRecord,
     WorkerCapabilityAssignmentRecord, WorkerCapabilityRecord,
@@ -21,7 +22,7 @@ from app.workers.models import (
 from app.workers.registry import CAPABILITY_CATALOG, build_default_registry
 from app.workers.runtime_contract import (
     ActivityEventType, AttemptStatus, TaskStatus, WorkerHeartbeatContract,
-    WorkerProcessState, validate_task_transition,
+    WorkerProcessState, is_terminal_task_status, validate_task_transition,
 )
 
 MAX_PAYLOAD_BYTES = 64 * 1024
@@ -49,8 +50,23 @@ def _now(value: datetime | None = None) -> datetime:
     return result.astimezone(timezone.utc)
 
 
+def _payload_expiry_for_status(status: TaskStatus, stamp: datetime) -> datetime | None:
+    if status is TaskStatus.WAITING_REVIEW:
+        retention_days = int(settings.WORKER_REVIEW_PAYLOAD_RETENTION_DAYS)
+    elif is_terminal_task_status(status):
+        retention_days = int(settings.WORKER_TASK_PAYLOAD_RETENTION_DAYS)
+    else:
+        return None
+    if not 1 <= retention_days <= 365:
+        raise ValueError("payload retention days must be between 1 and 365")
+    return stamp + timedelta(days=retention_days)
+
+
 def _validate_payload(payload: dict | None) -> dict:
-    payload = payload or {}
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
     encoded = dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(encoded) > MAX_PAYLOAD_BYTES:
         raise ValueError(f"payload exceeds {MAX_PAYLOAD_BYTES} bytes")
@@ -356,6 +372,7 @@ def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload
     task.status = TaskStatus.COMPLETED.value
     task.result_payload = payload
     task.completed_at = stamp
+    task.payload_expires_at = _payload_expiry_for_status(TaskStatus.COMPLETED, stamp)
     task.updated_at = stamp
     task.lease_token = None
     task.lease_owner = None
@@ -410,6 +427,7 @@ def fail_task(db: Session, *, task_id: str, lease_token: str, error_code: str,
         task.status = TaskStatus.FAILED.value
         attempt.status = AttemptStatus.FAILED.value
         event = ActivityEventType.TASK_FAILED
+    task.payload_expires_at = _payload_expiry_for_status(TaskStatus(task.status), stamp)
     task.lease_token = None
     task.lease_owner = None
     task.lease_expires_at = None
@@ -445,6 +463,7 @@ def cancel_task(db: Session, *, task_id: str, now: datetime | None = None) -> Wo
             active_attempt.finished_at = stamp
         event_type = ActivityEventType.TASK_CANCELLED
     task.updated_at = stamp
+    task.payload_expires_at = _payload_expiry_for_status(TaskStatus(task.status), stamp)
     task.lease_token = None
     task.lease_owner = None
     task.lease_expires_at = None
@@ -492,6 +511,7 @@ def recover_expired_leases(db: Session, *, now: datetime | None = None, base_bac
             recovered["dead_lettered"] += 1
             event = ActivityEventType.TASK_DEAD_LETTERED
         task.failure_code = attempt.error_code if attempt is not None else "LEASE_EXPIRED"
+        task.payload_expires_at = _payload_expiry_for_status(TaskStatus(task.status), stamp)
         task.lease_token = None
         task.lease_owner = None
         task.lease_expires_at = None
@@ -516,6 +536,7 @@ def expire_deadline_tasks(db: Session, *, now: datetime | None = None) -> int:
         validate_task_transition(TaskStatus(task.status), TaskStatus.DEAD_LETTERED)
         task.status = TaskStatus.DEAD_LETTERED.value
         task.failure_code = "DEADLINE_EXPIRED"
+        task.payload_expires_at = _payload_expiry_for_status(TaskStatus.DEAD_LETTERED, stamp)
         task.updated_at = stamp
         _append_event(
             db, event_type=ActivityEventType.TASK_DEAD_LETTERED,
@@ -524,3 +545,39 @@ def expire_deadline_tasks(db: Session, *, now: datetime | None = None) -> int:
         )
     db.flush()
     return len(rows)
+
+def purge_expired_task_payloads(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    batch_size: int = 100,
+) -> int:
+    """Erase expired task input/output while preserving lifecycle and billing metadata."""
+    if not 1 <= int(batch_size) <= 500:
+        raise ValueError("batch_size must be between 1 and 500")
+    stamp = _now(now)
+    purgeable_statuses = [
+        TaskStatus.WAITING_REVIEW.value,
+        TaskStatus.COMPLETED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.CANCELLED.value,
+        TaskStatus.DEAD_LETTERED.value,
+    ]
+    rows = db.execute(
+        select(WorkTaskRecord).where(
+            WorkTaskRecord.status.in_(purgeable_statuses),
+            WorkTaskRecord.payload_expires_at.is_not(None),
+            WorkTaskRecord.payload_expires_at <= stamp,
+            WorkTaskRecord.payload_purged_at.is_(None),
+        ).order_by(
+            WorkTaskRecord.payload_expires_at.asc(),
+            WorkTaskRecord.task_id.asc(),
+        ).limit(int(batch_size)).with_for_update(skip_locked=True)
+    ).scalars().all()
+    for task in rows:
+        task.input_payload = {}
+        task.result_payload = None
+        task.payload_purged_at = stamp
+    db.flush()
+    return len(rows)
+

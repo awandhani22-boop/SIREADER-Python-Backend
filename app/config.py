@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -120,6 +121,8 @@ class Settings(BaseSettings):
     WORKER_TASK_MAX_ATTEMPTS: int = 3
     WORKER_TASK_LEASE_SECONDS: int = 150
     WORKER_HEARTBEAT_TIMEOUT_SECONDS: int = 60
+    WORKER_TASK_PAYLOAD_RETENTION_DAYS: int = Field(default=30, ge=1, le=365)
+    WORKER_REVIEW_PAYLOAD_RETENTION_DAYS: int = Field(default=90, ge=1, le=365)
 
     # TOKENMURAH PRICING
     # Semua tarif dalam Rupiah per 1 juta token.

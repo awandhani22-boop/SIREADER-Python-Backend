@@ -86,8 +86,33 @@ CREATE TABLE IF NOT EXISTS public.workforce_tasks (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     completed_at timestamptz,
-    CHECK (deadline_at IS NULL OR deadline_at > created_at)
+    payload_expires_at timestamptz,
+    payload_purged_at timestamptz,
+    CHECK (deadline_at IS NULL OR deadline_at > created_at),
+    CHECK (payload_purged_at IS NULL OR (input_payload = '{}'::jsonb AND result_payload IS NULL))
 );
+-- Keep reapplication safe for disposable databases created by an earlier
+-- Phase 4 migration revision.
+ALTER TABLE public.workforce_tasks
+    ADD COLUMN IF NOT EXISTS payload_expires_at timestamptz;
+ALTER TABLE public.workforce_tasks
+    ADD COLUMN IF NOT EXISTS payload_purged_at timestamptz;
+DO $payload_retention_constraint$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'public.workforce_tasks'::regclass
+          AND conname = 'ck_workforce_task_payload_purged_empty'
+    ) THEN
+        ALTER TABLE public.workforce_tasks
+            ADD CONSTRAINT ck_workforce_task_payload_purged_empty
+            CHECK (payload_purged_at IS NULL OR (input_payload = '{}'::jsonb AND result_payload IS NULL));
+    END IF;
+END;
+$payload_retention_constraint$;
+CREATE INDEX IF NOT EXISTS ix_workforce_task_payload_expiry
+    ON public.workforce_tasks(payload_expires_at)
+    WHERE payload_expires_at IS NOT NULL AND payload_purged_at IS NULL;
 CREATE INDEX IF NOT EXISTS ix_workforce_task_queue ON public.workforce_tasks(status, not_before, priority DESC, created_at);
 CREATE INDEX IF NOT EXISTS ix_workforce_task_worker_status ON public.workforce_tasks(assigned_worker_id, status);
 CREATE INDEX IF NOT EXISTS ix_workforce_task_lease_expiry ON public.workforce_tasks(lease_expires_at) WHERE status IN ('CLAIMED','RUNNING');

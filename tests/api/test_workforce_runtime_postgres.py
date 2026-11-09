@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from app.workers.repository import (
     cancel_task, claim_next_task, complete_task, enqueue_task, expire_deadline_tasks,
     heartbeat_worker, mark_provider_requested, recover_expired_leases,
-    start_task, sync_default_registry,
+    start_task, sync_default_registry, purge_expired_task_payloads,
 )
 from app.workers.runtime_contract import (
     ActivityEventType, AttemptStatus, TaskStatus, WorkerHeartbeatContract,
@@ -147,6 +147,15 @@ def test_workforce_migration_security_and_task_lifecycle():
             task_ids = []
             with Session() as db:
                 with db.begin():
+                    with pytest.raises(ValueError, match="JSON object"):
+                        enqueue_task(
+                            db, task_type="SUMMARIZATION", title="Invalid payload",
+                            required_capability="summarization", input_payload=["not", "an object"],
+                            idempotency_key="phase4-invalid-payload-0001", now=now,
+                        )
+
+            with Session() as db:
+                with db.begin():
                     first, created = enqueue_task(
                         db, task_type="SUMMARIZATION", title="Summarize document",
                         required_capability="summarization", input_payload={"text": "safe test"},
@@ -239,10 +248,11 @@ def test_workforce_migration_security_and_task_lifecycle():
                         db, task_id=retry[0].task_id, lease_token=retry[1].lease_token,
                         now=recovery_time + timedelta(minutes=1, seconds=1),
                     )
+                    completed_at = recovery_time + timedelta(minutes=1, seconds=1)
                     complete_task(
                         db, task_id=retry[0].task_id, lease_token=retry[1].lease_token,
                         result_payload={"source": "SIMULATED", "summary": "test completed"},
-                        now=recovery_time + timedelta(minutes=1, seconds=1),
+                        now=completed_at,
                     )
 
             # A second claim without a matching fresh heartbeat is rejected; a real
@@ -270,6 +280,37 @@ def test_workforce_migration_security_and_task_lifecycle():
                     assert pending[0].task_id not in {pre_task_id, provider_task_id}
                     cancelled = cancel_task(db, task_id=pending[0].task_id, now=recovery_time + timedelta(minutes=1, seconds=3))
                     assert cancelled.status == TaskStatus.CANCELLED.value
+
+            # Terminal payloads expire after 30 days; unresolved provider outcomes
+            # keep their payload for the longer 90-day review window. Metadata stays.
+            with Session() as db:
+                with db.begin():
+                    completed = db.get(WorkTaskRecord, pre_task_id)
+                    review = db.get(WorkTaskRecord, provider_task_id)
+                    assert completed.payload_expires_at == completed_at + timedelta(days=30)
+                    assert review.payload_expires_at == recovery_time + timedelta(days=90)
+                    assert purge_expired_task_payloads(db, now=recovery_time + timedelta(days=31)) == 3
+
+            with Session() as db:
+                completed = db.get(WorkTaskRecord, pre_task_id)
+                review = db.get(WorkTaskRecord, provider_task_id)
+                deadline = db.get(WorkTaskRecord, task_ids[3])
+                cancelled = db.get(WorkTaskRecord, pending[0].task_id)
+                assert completed.input_payload == {}
+                assert completed.result_payload is None
+                assert completed.payload_purged_at is not None
+                assert deadline.payload_purged_at is not None
+                assert cancelled.payload_purged_at is not None
+                assert review.input_payload == {"text": "safe test"}
+                assert review.payload_purged_at is None
+
+            with Session() as db:
+                with db.begin():
+                    assert purge_expired_task_payloads(db, now=recovery_time + timedelta(days=91)) == 1
+            with Session() as db:
+                review = db.get(WorkTaskRecord, provider_task_id)
+                assert review.input_payload == {}
+                assert review.payload_purged_at is not None
 
             with Session() as db:
                 events = db.query(WorkActivityEventRecord).filter(WorkActivityEventRecord.task_id.in_(task_ids)).all()
