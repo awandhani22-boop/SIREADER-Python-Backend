@@ -23,13 +23,13 @@ async def generate_event_stream(
 ) -> AsyncIterator[str]:
     """Yield the retry directive, event frames, and idle heartbeat comments."""
     try:
-        yield "retry: 3000\\n\\n"
+        yield "retry: 3000\n\n"
         while not await request.is_disconnected():
             message = await subscriber.next_message(HEARTBEAT_SECONDS)
             if message is None:
                 if subscriber.closed:
                     break
-                yield ": ping\\n\\n"
+                yield ": ping\n\n"
                 continue
             yield message.encode()
             if message.event == "stream.reset":
