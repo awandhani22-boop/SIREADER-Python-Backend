@@ -214,7 +214,8 @@ def run_worker_once(
         with SessionLocal() as db:
             with db.begin():
                 mark_provider_requested(
-                    db, task_id=task_id, lease_token=lease_token, now=_utc_now(),
+                    db, task_id=task_id, lease_token=lease_token,
+                    provider_request_id=_provider_request_id, now=_utc_now(),
                 )
 
     request = WorkerExecutionRequest(
