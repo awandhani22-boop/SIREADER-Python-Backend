@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -1278,3 +1279,47 @@ def test_sensitive_task_policy_forces_atomic_human_output_review(db_session: Ses
     assert complete_event is not None
     assert complete_event.payload["sensitive_action"] == "REVIEW"
     assert complete_event.payload["policy_version"] == POLICY_VERSION
+
+
+def test_run_maintenance_once_orders_expiry_before_payload_purge(monkeypatch):
+    from app.workers import maintenance
+
+    calls = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        @contextmanager
+        def begin(self):
+            yield self
+
+    monkeypatch.setattr(maintenance, "recover_expired_leases",
+                        lambda db, now=None: calls.append("recover") or {"requeued": 1, "waiting_review": 2, "dead_lettered": 3})
+    monkeypatch.setattr(maintenance, "expire_deadline_tasks",
+                        lambda db, now=None: calls.append("deadlines") or 4)
+    monkeypatch.setattr(maintenance, "expire_stale_reviews",
+                        lambda db, now=None: calls.append("expire_reviews") or 5)
+    monkeypatch.setattr(maintenance, "purge_expired_task_payloads",
+                        lambda db, now=None: calls.append("purge_tasks") or 6)
+    monkeypatch.setattr(maintenance, "purge_expired_review_payloads",
+                        lambda db, now=None: calls.append("purge_reviews") or 7)
+
+    result = maintenance.run_maintenance_once(
+        session_factory=FakeSession,
+        now=datetime(2026, 11, 10, tzinfo=timezone.utc),
+    )
+
+    assert calls == ["recover", "deadlines", "expire_reviews", "purge_tasks", "purge_reviews"]
+    assert result == {
+        "leases_recovered_requeued": 1,
+        "leases_recovered_waiting_review": 2,
+        "leases_recovered_dead_lettered": 3,
+        "deadline_tasks_expired": 4,
+        "stale_reviews_expired": 5,
+        "task_payloads_purged": 6,
+        "review_payloads_purged": 7,
+    }

@@ -35,6 +35,9 @@ JOIN public.workforce_task_attempts AS a
   ON a.provider_request_id = u.request_id
 WHERE a.provider_request_id IS NOT NULL;
 
+GRANT USAGE ON SCHEMA public TO sireader_view_owner;
+GRANT SELECT (request_id) ON public.ai_usage_logs TO sireader_view_owner;
+GRANT SELECT (provider_request_id) ON public.workforce_task_attempts TO sireader_view_owner;
 GRANT CREATE ON SCHEMA public TO sireader_view_owner;
 ALTER VIEW public.v_api_workforce_ai_usage OWNER TO sireader_view_owner;
 REVOKE CREATE ON SCHEMA public FROM sireader_view_owner;

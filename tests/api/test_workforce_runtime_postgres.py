@@ -47,6 +47,10 @@ def test_workforce_migration_security_and_task_lifecycle():
     views_rollback_name = "2026_11_09_workforce_api_views_v1_rollback.sql"
     timeline_migration_name = "2026_11_09_workforce_timeline_v2.sql"
     timeline_rollback_name = "2026_11_09_workforce_timeline_v2_rollback.sql"
+    review_migration_name = "2026_11_10_workforce_reviews_v1.sql"
+    review_rollback_name = "2026_11_10_workforce_reviews_v1_rollback.sql"
+    budget_migration_name = "2026_11_10_workforce_budget_observability_v1.sql"
+    budget_rollback_name = "2026_11_10_workforce_budget_observability_v1_rollback.sql"
 
     with psycopg.connect(PSYCOPG_URL, autocommit=True) as admin:
         roles = {row[0] for row in admin.execute("SELECT rolname FROM pg_roles WHERE rolname IN ('sireader_view_owner', 'sireader_api_ro', 'sireader_workforce_cmd')")}
@@ -58,12 +62,14 @@ def test_workforce_migration_security_and_task_lifecycle():
         # always tested from their actual pre-Phase-5 schema, not against a
         # previously upgraded view with an extra accepting_tasks column.
         for view_name in (
+            "v_api_workforce_ai_usage", "v_api_workforce_task_reviews",
             "v_api_workforce_task_timeline", "v_api_workforce_runtime", "v_api_workforce_activity",
             "v_api_workforce_attempts", "v_api_workforce_tasks",
             "v_api_workforce_workers",
         ):
             admin.execute(f"DROP VIEW IF EXISTS public.{view_name} CASCADE")
         for table_name in (
+            "workforce_task_review_payloads", "workforce_task_reviews",
             "workforce_command_audit", "workforce_activity_events",
             "workforce_task_attempts", "workforce_tasks", "workforce_heartbeats",
             "workforce_worker_capabilities", "workforce_capabilities", "workforce_workers",
@@ -71,6 +77,8 @@ def test_workforce_migration_security_and_task_lifecycle():
             admin.execute(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
         admin.execute("DROP FUNCTION IF EXISTS public.sireader_notify_workforce_v1() CASCADE")
         admin.execute("DROP FUNCTION IF EXISTS public.sireader_reject_command_audit_mutation_v1() CASCADE")
+        admin.execute("DROP FUNCTION IF EXISTS public.sireader_guard_review_payloads_v1() CASCADE")
+        admin.execute("DROP FUNCTION IF EXISTS public.sireader_guard_review_metadata_v1() CASCADE")
 
         try:
             _run_migration(admin, root, migration_name)
@@ -81,6 +89,15 @@ def test_workforce_migration_security_and_task_lifecycle():
             _run_migration(admin, root, command_migration_name)  # idempotent command boundary
             _run_migration(admin, root, timeline_migration_name)
             _run_migration(admin, root, timeline_migration_name)  # idempotent timeline boundary
+            _run_migration(admin, root, review_migration_name)
+            _run_migration(admin, root, review_migration_name)  # idempotent review boundary
+            _run_migration(admin, root, budget_migration_name)
+            _run_migration(admin, root, budget_migration_name)  # idempotent budget view
+            # Verify rollback/forward behavior for both Phase 5 migrations.
+            _run_migration(admin, root, budget_rollback_name)
+            _run_migration(admin, root, review_rollback_name)
+            _run_migration(admin, root, review_migration_name)
+            _run_migration(admin, root, budget_migration_name)
             counts = admin.execute(
                 """
                 SELECT
@@ -110,6 +127,8 @@ def test_workforce_migration_security_and_task_lifecycle():
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_tasks").fetchone()[0] == 0
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_attempts").fetchone()[0] == 0
                 assert api.execute("SELECT count(*) FROM public.v_api_workforce_activity").fetchone()[0] == 0
+                assert api.execute("SELECT count(*) FROM public.v_api_workforce_task_reviews").fetchone()[0] == 0
+                assert api.execute("SELECT count(*) FROM public.v_api_workforce_ai_usage").fetchone()[0] == 0
 
             now = datetime.now(timezone.utc).replace(microsecond=0)
             with Session() as db:
@@ -369,6 +388,8 @@ def test_workforce_migration_security_and_task_lifecycle():
                 assert [item.payload for item in notices] == ["workforce"]
 
         finally:
+            _run_migration(admin, root, budget_rollback_name)
+            _run_migration(admin, root, review_rollback_name)
             _run_migration(admin, root, timeline_rollback_name)
             _run_migration(admin, root, command_rollback_name)
             _run_migration(admin, root, views_rollback_name)
