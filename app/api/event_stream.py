@@ -60,6 +60,22 @@ def validate_trigger_inventory(
         raise RuntimeError("SSE notification migration is missing or unsafe.")
 
 
+def validate_workforce_trigger_inventory(
+    row_trigger_tables: int,
+    truncate_trigger_tables: int,
+    security_definer_functions: int,
+    unsafe_search_path_functions: int,
+) -> None:
+    """Fail closed unless all seven workforce tables publish safe invalidations."""
+    if (
+        row_trigger_tables != 7
+        or truncate_trigger_tables != 7
+        or security_definer_functions != 0
+        or unsafe_search_path_functions != 0
+    ):
+        raise RuntimeError("Workforce SSE notification migration is missing or unsafe.")
+
+
 @dataclass(frozen=True)
 class StreamMessage:
     event: str
@@ -350,7 +366,13 @@ class PostgresNotifyListener:
                 count(*) FILTER (
                     WHERE p.proconfig IS NULL
                        OR NOT (p.proconfig @> ARRAY['search_path=pg_catalog']::text[])
-                )::int AS unsafe_search_path_functions
+                )::int AS unsafe_search_path_functions,
+                count(DISTINCT c.relname) FILTER (
+                    WHERE t.tgname = 'sireader_workforce_notify'
+                )::int AS workforce_row_trigger_tables,
+                count(DISTINCT c.relname) FILTER (
+                    WHERE t.tgname = 'sireader_workforce_truncate'
+                )::int AS workforce_truncate_trigger_tables
             FROM pg_catalog.pg_trigger AS t
             JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid
             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
@@ -363,11 +385,20 @@ class PostgresNotifyListener:
                   'ai_analysis_logs',
                   'ai_pending_messages',
                   'trade_decision_watches',
-                  'approval_decisions'
+                  'approval_decisions',
+                  'workforce_workers',
+                  'workforce_capabilities',
+                  'workforce_worker_capabilities',
+                  'workforce_heartbeats',
+                  'workforce_tasks',
+                  'workforce_task_attempts',
+                  'workforce_activity_events'
               ])
               AND t.tgname IN (
                   'sireader_observability_notify',
-                  'sireader_observability_truncate'
+                  'sireader_observability_truncate',
+                  'sireader_workforce_notify',
+                  'sireader_workforce_truncate'
               )
             """
         )
@@ -376,6 +407,7 @@ class PostgresNotifyListener:
             validate_trigger_inventory(0, 0, 1, 1)
             return
         validate_trigger_inventory(int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+        validate_workforce_trigger_inventory(int(row[4]), int(row[5]), int(row[2]), int(row[3]))
 
     async def _run(self) -> None:
         from psycopg import AsyncConnection
