@@ -365,13 +365,22 @@ def test_db_terminal_metadata_immutability(db_session: Session):
         review_id=review_id,
         task_id=task_id,
         attempt_id=attempt_id,
-        status=ReviewStatus.APPROVED.value,
+        status=ReviewStatus.PENDING.value,
         original_output_sha256="c" * 64,
-        adjudicated_by="operator_dan",
-        adjudicated_at=now,
         review_expires_at=now + timedelta(hours=24),
     )
     db_session.add(rev)
+    db_session.flush()
+
+    # Terminal state must be reached by a valid transition from PENDING.
+    db_session.execute(
+        text(
+            "UPDATE public.workforce_task_reviews "
+            "SET status = 'APPROVED', adjudicated_by = 'operator_dan', adjudicated_at = :now "
+            "WHERE review_id = :r"
+        ),
+        {"now": now, "r": review_id},
+    )
     db_session.flush()
 
     # Attempt to modify terminal review must be rejected by trigger
