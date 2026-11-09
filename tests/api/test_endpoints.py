@@ -26,6 +26,8 @@ from app.api.views import (
     v_api_queued_pending_messages,
     v_api_system_runtime_state,
     v_api_telemetry_usage,
+    v_api_workforce_runtime,
+    v_api_workforce_workers,
 )
 
 SECRET = "test-only-api-secret"
@@ -69,6 +71,10 @@ def test_all_observability_endpoints_require_bearer(api_client):
         "/api/v1/pipeline/active",
         "/api/v1/market-watches/active",
         "/api/v1/audit/decisions",
+        "/api/v1/workforce/runtime",
+        "/api/v1/workforce/tasks",
+        "/api/v1/workforce/attempts?task_id=task_12345678",
+        "/api/v1/workforce/activity",
     ]
     for path in paths:
         response = client.get(path)
@@ -84,9 +90,54 @@ def test_business_endpoints_are_get_only(api_client):
         "/api/v1/pipeline/active",
         "/api/v1/market-watches/active",
         "/api/v1/audit/decisions",
+        "/api/v1/workforce/runtime",
+        "/api/v1/workforce/tasks",
+        "/api/v1/workforce/attempts?task_id=task_12345678",
+        "/api/v1/workforce/activity",
     ]:
         for method in ("POST", "PUT", "PATCH", "DELETE"):
             assert client.request(method, path, headers=_headers()).status_code == 405
+
+
+
+def test_workforce_runtime_endpoint_returns_authenticated_worker_snapshot(api_client):
+    client, sessions = api_client
+    with sessions.begin() as session:
+        session.execute(insert(v_api_workforce_runtime).values(
+            observed_at=NOW, configured_workers=7, ready_workers=1,
+            stale_workers=0, offline_workers=6, active_tasks=0,
+            queued_tasks=2, waiting_review_tasks=0, dead_lettered_tasks=0,
+            completed_last_24h=3,
+        ))
+        session.execute(insert(v_api_workforce_workers).values(
+            worker_id="haiku", display_name="Haiku Worker",
+            role="Fast Research & Intake Specialist", department="Research",
+            enabled=True, max_concurrency=2, model_tier="FAST",
+            process_status="READY", heartbeat_at=NOW, active_task_count=0,
+            in_flight_provider_requests=0, schema_version=1,
+            created_at=NOW, updated_at=NOW,
+        ))
+    response = client.get("/api/v1/workforce/runtime", headers=_headers())
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["runtime"]["configured_workers"] == 7
+    assert payload["runtime"]["ready_workers"] == 1
+    assert payload["workers"][0]["worker_id"] == "haiku"
+    assert payload["workers"][0]["process_status"] == "READY"
+    assert "input_payload" not in payload["workers"][0]
+
+
+def test_workforce_read_endpoints_return_bounded_empty_collections(api_client):
+    client, _ = api_client
+    tasks = client.get("/api/v1/workforce/tasks?limit=10&offset=0", headers=_headers())
+    activity = client.get("/api/v1/workforce/activity?limit=10&offset=0", headers=_headers())
+    attempts = client.get(
+        "/api/v1/workforce/attempts?task_id=task_12345678",
+        headers=_headers(),
+    )
+    assert tasks.status_code == 200 and tasks.json()["total_count"] == 0
+    assert activity.status_code == 200 and activity.json()["total_count"] == 0
+    assert attempts.status_code == 404
 
 
 def test_system_status_returns_none_when_runtime_view_empty(api_client):
@@ -321,7 +372,7 @@ def _safe_privilege_snapshot():
         "owner_has_role_memberships": False,
         "owner_unapproved_column_access": False,
         "owner_column_allowlist_ok": True,
-        "approved_view_count": 6,
+        "approved_view_count": 11,
         "approved_view_owners_ok": True,
         "approved_view_select_ok": True,
         "view_owner_attributes_ok": True,
@@ -381,7 +432,7 @@ def test_approved_views_execution_probe_checks_exact_allowlist():
 
     session = FakeSession()
     validate_approved_views_executable(session)
-    assert len(session.statements) == 6
+    assert len(session.statements) == 11
     assert all(statement.startswith("SELECT 1 FROM public.") for statement in session.statements)
     assert all(statement.endswith("LIMIT 1") for statement in session.statements)
     assert {statement.split("FROM public.", 1)[1].split()[0] for statement in session.statements} == {
@@ -391,6 +442,11 @@ def test_approved_views_execution_probe_checks_exact_allowlist():
         "v_api_queued_pending_messages",
         "v_api_active_market_watches",
         "v_api_audit_decisions",
+        "v_api_workforce_workers",
+        "v_api_workforce_tasks",
+        "v_api_workforce_attempts",
+        "v_api_workforce_activity",
+        "v_api_workforce_runtime",
     }
 
 
