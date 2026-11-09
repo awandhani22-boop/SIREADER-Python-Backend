@@ -5,7 +5,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from threading import Event
-from typing import Protocol
+from typing import Callable, Protocol
 from uuid import uuid4
 
 from app.ai import omniroute_client
@@ -31,6 +31,7 @@ class WorkerExecutionRequest:
     correlation_id: str
     attempt_request_id: str
     cancellation: Event | None = None
+    on_provider_reserved: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,7 @@ class OmniRouteWorkerProvider:
                 tier=worker.model_tier,
                 messages=messages,
                 request_id=request.attempt_request_id,
+                on_reserved=request.on_provider_reserved,
                 **max_cost,
             )
         except Exception as exc:  # provider errors are intentionally not retried here
