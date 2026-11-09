@@ -133,6 +133,12 @@ class OmniRouteWorkerProvider:
             from app.ai.cost_guard import BudgetExceededError
             if isinstance(exc, BudgetExceededError):
                 raise WorkerProviderError("BUDGET_BLOCKED", "Cost Guard rejected the per-task or global reservation.") from exc
+            if isinstance(exc, omniroute_client.AIRequestError) and exc.definitely_not_charged:
+                raise WorkerProviderError(
+                    "PROVIDER_STATE_PERSIST_FAILED",
+                    "Provider request was not sent because its reserved state could not be persisted.",
+                    retryable=True,
+                ) from exc
             raise WorkerProviderError("PROVIDER_OUTCOME_UNKNOWN", "Provider call failed; reconcile its usage reservation before retrying.", outcome_unknown=True) from exc
         return WorkerProviderResult(
             result_payload={
