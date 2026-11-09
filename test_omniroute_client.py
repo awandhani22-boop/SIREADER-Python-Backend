@@ -132,3 +132,46 @@ def test_token_negatif_ditolak():
 
     with pytest.raises(client.AIUsageMissingError):
         client.normalize_usage(usage)
+
+
+
+def test_worker_pre_request_persistence_failure_releases_cost_reservation(monkeypatch):
+    monkeypatch.setattr(client.settings, "AI_API_KEY", "test-only-key")
+    monkeypatch.setattr(client.settings, "AI_BASE_URL", "http://127.0.0.1:20128/v1")
+    monkeypatch.setattr(client, "get_tier_config", lambda _tier: {
+        "model": "tokenmurah/claude-haiku-4-5-20251001",
+        "max_output": 64,
+    })
+    monkeypatch.setattr(client, "reserve_ai_request", lambda **_kwargs: {
+        "request_id": "attempt-request-123",
+        "billing_currency": "IDR",
+    })
+    failed = {}
+    monkeypatch.setattr(
+        client,
+        "mark_ai_request_failed",
+        lambda request_id, error, definitely_not_charged=False: failed.update({
+            "request_id": request_id,
+            "error": error,
+            "definitely_not_charged": definitely_not_charged,
+        }),
+    )
+
+    def reject_persistence(_request_id):
+        raise RuntimeError("database unavailable")
+
+    def unexpected_network_call(*_args, **_kwargs):
+        pytest.fail("Provider network request must not be sent after persistence failure.")
+
+    monkeypatch.setattr(client, "urlopen", unexpected_network_call)
+
+    with pytest.raises(client.AIRequestError) as error:
+        client.call_ai(
+            tier="FAST",
+            messages=[{"role": "user", "content": "test"}],
+            on_reserved=reject_persistence,
+        )
+
+    assert error.value.definitely_not_charged is True
+    assert failed["request_id"] == "attempt-request-123"
+    assert failed["definitely_not_charged"] is True
