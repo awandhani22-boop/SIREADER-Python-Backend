@@ -40,6 +40,8 @@ def test_workforce_migration_security_and_task_lifecycle():
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     migration_name = "2026_11_09_workforce_runtime_v1.sql"
     rollback_name = "2026_11_09_workforce_runtime_v1_rollback.sql"
+    views_migration_name = "2026_11_09_workforce_api_views_v1.sql"
+    views_rollback_name = "2026_11_09_workforce_api_views_v1_rollback.sql"
 
     with psycopg.connect(PSYCOPG_URL, autocommit=True) as admin:
         roles = {row[0] for row in admin.execute("SELECT rolname FROM pg_roles WHERE rolname IN ('sireader_view_owner', 'sireader_api_ro')")}
@@ -48,6 +50,8 @@ def test_workforce_migration_security_and_task_lifecycle():
         try:
             _run_migration(admin, root, migration_name)
             _run_migration(admin, root, migration_name)  # idempotency
+            _run_migration(admin, root, views_migration_name)
+            _run_migration(admin, root, views_migration_name)  # idempotent view replacement
             counts = admin.execute(
                 """
                 SELECT
@@ -65,6 +69,12 @@ def test_workforce_migration_security_and_task_lifecycle():
                     api.execute("SELECT * FROM public.workforce_tasks")
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     api.execute("INSERT INTO public.workforce_tasks (task_id,idempotency_key,correlation_id,task_type,title,required_capability) VALUES ('x','blocked-key','blocked-corr','SUMMARIZATION','Blocked','summarization')")
+                assert api.execute("SELECT count(*) FROM public.v_api_workforce_workers").fetchone()[0] == 7
+                runtime_view = api.execute("SELECT configured_workers, ready_workers FROM public.v_api_workforce_runtime").fetchone()
+                assert runtime_view == (7, 0)
+                assert api.execute("SELECT count(*) FROM public.v_api_workforce_tasks").fetchone()[0] == 0
+                assert api.execute("SELECT count(*) FROM public.v_api_workforce_attempts").fetchone()[0] == 0
+                assert api.execute("SELECT count(*) FROM public.v_api_workforce_activity").fetchone()[0] == 0
 
             now = datetime.now(timezone.utc).replace(microsecond=0)
             with Session() as db:
@@ -214,5 +224,6 @@ def test_workforce_migration_security_and_task_lifecycle():
                 assert [item.payload for item in notices] == ["workforce"]
 
         finally:
+            _run_migration(admin, root, views_rollback_name)
             _run_migration(admin, root, rollback_name)
     engine.dispose()
