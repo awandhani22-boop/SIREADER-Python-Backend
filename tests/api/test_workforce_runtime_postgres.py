@@ -184,6 +184,10 @@ def test_workforce_migration_security_and_task_lifecycle():
                     )
                     assert retry is not None and retry[0].task_id == pre_task_id
                     assert retry[0].attempts == 2
+                    start_task(
+                        db, task_id=retry[0].task_id, lease_token=retry[1].lease_token,
+                        now=recovery_time + timedelta(minutes=1, seconds=1),
+                    )
                     complete_task(
                         db, task_id=retry[0].task_id, lease_token=retry[1].lease_token,
                         result_payload={"source": "SIMULATED", "summary": "test completed"},
