@@ -112,6 +112,8 @@ Do not run concurrently with a manually started database migration. The routine 
 - Review payloads are eligible only after a terminal review and parent task retention expiry.
 - Purged payloads cannot be restored.
 - Permanent review metadata and audit events remain available after payload purge.
+- Initial review metadata must be inserted as PENDING with no adjudication fields. Initial payload INSERT must contain sanitized original output only, while the review remains PENDING.
+- Incremental review migration v3 removes INSERT on review metadata and payload tables from `sireader_workforce_cmd`; the worker completion boundary is the only review-creation path. The command role only adjudicates existing reviews using its restricted UPDATE columns.
 - A retention/inspection failure is a hard error; do not bypass the guard or manually clear database columns.
 
 ## Incident response
@@ -126,8 +128,10 @@ Do not run concurrently with a manually started database migration. The routine 
 ## Verified implementation snapshot — 2026-11-10
 
 - Backend branch: `phase-5-implementation`.
-- Latest backend implementation and Windows Task Scheduler helper commit: `5b00acc83fc7ac738a26d188fe8851a30c2a0ce8`.
-- [Latest backend CI run 42698878591 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42698878591): 188 API tests passed, 76 core regression tests passed, and API compile succeeded.
-- The current commit adds `scripts/register_workforce_maintenance.ps1`, which registers/removes `SIREADER-WorkforceMaintenance` on the local Windows machine. It has not been executed on the owner's machine; no OS-level task is claimed as registered.
-- Earlier budget observability and policy/maintenance CI evidence remains in the Phase 5 execution report.
+- Latest backend code commit: `1c8277ea1ccf0ff0b81966b0d8bd6516829e1494`.
+- [Latest backend CI run 42700770005 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42700770005): 196 API tests passed, 76 core regression tests passed, and API compile succeeded.
+- Review creation boundary v3 [CI run 42700267022 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42700267022): 190 API tests and 76 core tests passed. It enforces PENDING-only metadata INSERT and removes command-role INSERT privileges.
+- Maintenance database safety guard [CI run 42700636167 PASS](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42700636167): 196 API tests and 76 core tests passed.
+- `scripts/register_workforce_maintenance.ps1` registers/removes the five-minute task but has not been executed on the owner's machine; no OS-level task is claimed as registered.
+- CI uses disposable test infrastructure. It does not deploy migrations to Supabase LIVE, start a paid provider, inspect the owner's `.env`, or register a local Windows scheduled task.
 - CI uses disposable test infrastructure. It does not deploy migrations to Supabase LIVE, start a paid provider, or register a local Windows scheduled task.

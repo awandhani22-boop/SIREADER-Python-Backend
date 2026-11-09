@@ -57,6 +57,9 @@ The existing Cost Guard is the only usage/reservation ledger. One workforce atte
 
 ## Human review and retention
 
+- Review metadata must be created in PENDING; the database trigger rejects a forged initial terminal state or pre-filled adjudication fields.
+- The initial payload row must contain only sanitized `original_output`, while the associated review is PENDING. An adjusted output can be written once only as part of the EDITED transition.
+- The command DB role `sireader_workforce_cmd` has no INSERT privilege on review metadata or payload tables. Worker completion is the sole review creation boundary; command credentials only adjudicate existing records through restricted UPDATE privileges.
 - Output requiring review is sanitized and quarantined in the same completion transaction.
 - The ordinary task `result_payload` remains NULL while review is pending.
 - Adjudication requires a matching original-output SHA-256 and an idempotency key.
@@ -66,8 +69,12 @@ The existing Cost Guard is the only usage/reservation ledger. One workforce atte
 
 ## Operational readiness
 
-The worker runtime defaults remain disabled/Mock. No paid provider call is required for CI. The maintenance command is a one-shot transactional command and must be registered with the deployment scheduler by the operator. This repository does not prove that a Windows scheduled task has been registered.
+The worker runtime defaults remain disabled/Mock. No paid provider call is required for CI. Maintenance is data-mutating because it expires and purges retained payloads. Both the Python command and PowerShell registration helper fail closed unless the effective database target is PostgreSQL at `localhost`, `127.0.0.1`, or `::1`; remote, Supabase, and production hosts are blocked. The PowerShell helper also inspects `.env` and Process/User/Machine environment overrides. The effective owner `DATABASE_URL` has not been inspected in this session, and no scheduled task has been registered.
 
 ## CI evidence
 
-[Backend final policy/maintenance CI run 42671067597](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42671067597) — 187 API tests and 76 core tests passed.
+[Backend review creation boundary v3 CI run 42700267022](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42700267022) — 190 API tests and 76 core tests passed.
+
+[Backend maintenance loopback guard CI run 42700636167](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42700636167) — 196 API tests and 76 core tests passed.
+
+[Latest backend CI run 42700770005](https://github.com/awandhani22-boop/SIREADER-Python-Backend/actions/runs/42700770005) — 196 API tests, 76 core tests, and API compile succeeded.
