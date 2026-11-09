@@ -7,6 +7,7 @@ on:
       - phase-3-1-api-gateway
       - phase-3-3-sse-implementation
       - phase-4-implementation
+      - phase-5-implementation
   pull_request:
     branches:
       - main
@@ -61,11 +62,13 @@ jobs:
             tests/api/test_postgres_privileges.py \
             tests/api/test_event_stream.py \
             tests/api/test_event_migration_postgres.py \
-            tests/api/test_workforce_runtime_postgres.py
+            tests/api/test_workforce_runtime_postgres.py \
+            tests/api/test_workforce_commands.py \
+            tests/api/test_workforce_command_config.py
 
       - name: Compile API package
         run: |
-          python -m compileall -q app/api app/workers
+          python -m compileall -q app/api app/workers app/command_api
 
       - name: Run core regression tests
         env:
