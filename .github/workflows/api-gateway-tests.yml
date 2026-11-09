@@ -1,6 +1,7 @@
 name: SIREADER API Gateway Tests
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - phase-3-1-api-gateway
