@@ -88,6 +88,59 @@ def validate_command_database_security(session: Session) -> None:
         WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','f')
     """)).mappings().all()
 
+
+    protected_tables = {
+        "workforce_workers", "workforce_capabilities", "workforce_worker_capabilities",
+        "workforce_tasks", "workforce_task_attempts", "workforce_activity_events",
+        "workforce_command_audit",
+    }
+    rls_rows = session.execute(text("""
+        SELECT c.relname, c.relrowsecurity
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = ANY(:table_names)
+    """), {"table_names": sorted(protected_tables)}).mappings().all()
+    if (
+        {row["relname"] for row in rls_rows} != protected_tables
+        or any(not row["relrowsecurity"] for row in rls_rows)
+    ):
+        raise RuntimeError("Row-level security must be enabled on every command-accessible workforce table.")
+
+    policies = session.execute(text("""
+        SELECT tablename, policyname, roles, cmd, qual, with_check
+        FROM pg_catalog.pg_policies
+        WHERE schemaname = 'public'
+    """)).mappings().all()
+    expected_policies = {
+        ("workforce_workers", "workforce_cmd_workers_select", "SELECT"),
+        ("workforce_workers", "workforce_cmd_workers_update", "UPDATE"),
+        ("workforce_capabilities", "workforce_cmd_capabilities_select", "SELECT"),
+        ("workforce_worker_capabilities", "workforce_cmd_worker_capabilities_select", "SELECT"),
+        ("workforce_tasks", "workforce_cmd_tasks_select", "SELECT"),
+        ("workforce_tasks", "workforce_cmd_tasks_insert", "INSERT"),
+        ("workforce_tasks", "workforce_cmd_tasks_update", "UPDATE"),
+        ("workforce_task_attempts", "workforce_cmd_attempts_select", "SELECT"),
+        ("workforce_task_attempts", "workforce_cmd_attempts_update", "UPDATE"),
+        ("workforce_activity_events", "workforce_cmd_activity_insert", "INSERT"),
+        ("workforce_command_audit", "workforce_cmd_audit_select", "SELECT"),
+        ("workforce_command_audit", "workforce_cmd_audit_insert", "INSERT"),
+    }
+    found = set()
+    for policy in policies:
+        roles = {str(role).lower() for role in policy["roles"]}
+        if policy["tablename"] in protected_tables and "public" in roles:
+            raise RuntimeError("PUBLIC must not have workforce row-level policies.")
+        if "sireader_workforce_cmd" not in roles:
+            continue
+        identity_key = (policy["tablename"], policy["policyname"], policy["cmd"])
+        found.add(identity_key)
+        expression = policy["qual"] or policy["with_check"] or ""
+        normalized = str(expression).replace("(", "").replace(")", "").strip().lower()
+        if normalized == "true":
+            raise RuntimeError("Workforce command RLS policy must not grant unrestricted rows.")
+    if found != expected_policies:
+        raise RuntimeError("Workforce command RLS policy set does not match the non-trading allowlist boundary.")
+
     sequence_access = session.execute(text("""
         SELECT EXISTS (
           SELECT 1 FROM pg_catalog.pg_class c

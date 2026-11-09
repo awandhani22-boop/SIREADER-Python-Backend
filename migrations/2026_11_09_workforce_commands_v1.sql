@@ -76,35 +76,112 @@ ON public.workforce_command_audit FOR INSERT TO sireader_workforce_cmd WITH CHEC
 -- Command API can read only the workforce rows it needs, and mutate only its
 -- bounded command tables. No direct access is granted to heartbeat, approval,
 -- Telegram, trading, runtime-control, AI pipeline, or provider usage tables.
+-- RLS narrows the dedicated database login to generic non-trading rows.
+-- The API handler applies the same allowlists; SQL remains the hard boundary.
 DO $policies$
+DECLARE
+    worker_allow text := $$worker_id IN ('supervisor','haiku','sonnet','opus','data_archivist')$$;
+    capability_allow text := $$capability_id IN (
+        'instruction_intake','task_decomposition','workflow_supervision',
+        'task_assignment_oversight','result_review','quick_research',
+        'information_extraction','summarization','lightweight_classification',
+        'data_analysis','comparison','evaluation','structured_reasoning',
+        'complex_reasoning','strategic_analysis','deep_review','data_archiving',
+        'artifact_indexing','historical_retrieval_simulation','data_organization'
+    )$$;
+    task_allow text := $task$
+        required_capability IN (
+            'instruction_intake','task_decomposition','workflow_supervision',
+            'task_assignment_oversight','result_review','quick_research',
+            'information_extraction','summarization','lightweight_classification',
+            'data_analysis','comparison','evaluation','structured_reasoning',
+            'complex_reasoning','strategic_analysis','deep_review','data_archiving',
+            'artifact_indexing','historical_retrieval_simulation','data_organization'
+        )
+        AND task_type IN (
+            'INSTRUCTION_INTAKE','ROUTING','TASK_DECOMPOSITION','WORKFLOW_SUPERVISION',
+            'TASK_ASSIGNMENT_OVERSIGHT','RESULT_REVIEW','REVIEW','QUICK_RESEARCH','RESEARCH',
+            'INFORMATION_EXTRACTION','CLASSIFICATION','SUMMARIZATION','LIGHTWEIGHT_CLASSIFICATION',
+            'DATA_ANALYSIS','REASONING','COMPARISON','EVALUATION','STRUCTURED_REASONING',
+            'COMPLEX_REASONING','ESCALATION','STRATEGIC_ANALYSIS','DEEP_REVIEW',
+            'DATA_ARCHIVING','ARCHIVAL','ARTIFACT_INDEXING','HISTORICAL_RETRIEVAL_SIMULATION',
+            'DATA_ORGANIZATION'
+        )
+        AND (requested_worker_id IS NULL OR requested_worker_id IN ('supervisor','haiku','sonnet','opus','data_archivist'))
+        AND (assigned_worker_id IS NULL OR assigned_worker_id IN ('supervisor','haiku','sonnet','opus','data_archivist'))
+    $task$;
+    task_reference text := format(
+        'EXISTS (SELECT 1 FROM public.workforce_tasks AS t WHERE t.task_id = %I.task_id AND (%s))',
+        'workforce_task_attempts', task_allow
+    );
+    activity_task_reference text := format(
+        'EXISTS (SELECT 1 FROM public.workforce_tasks AS t WHERE t.task_id = %I.task_id AND (%s))',
+        'workforce_activity_events', task_allow
+    );
 BEGIN
+    -- Clean up the original broad Phase 5 draft policy names on reapplication.
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_select ON public.workforce_workers';
-    EXECUTE 'CREATE POLICY workforce_cmd_select ON public.workforce_workers FOR SELECT TO sireader_workforce_cmd USING (true)';
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_update ON public.workforce_workers';
-    EXECUTE 'CREATE POLICY workforce_cmd_update ON public.workforce_workers FOR UPDATE TO sireader_workforce_cmd USING (true) WITH CHECK (true)';
-
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_select ON public.workforce_capabilities';
-    EXECUTE 'CREATE POLICY workforce_cmd_select ON public.workforce_capabilities FOR SELECT TO sireader_workforce_cmd USING (true)';
-
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_select ON public.workforce_worker_capabilities';
-    EXECUTE 'CREATE POLICY workforce_cmd_select ON public.workforce_worker_capabilities FOR SELECT TO sireader_workforce_cmd USING (true)';
-
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_select ON public.workforce_tasks';
-    EXECUTE 'CREATE POLICY workforce_cmd_select ON public.workforce_tasks FOR SELECT TO sireader_workforce_cmd USING (true)';
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_insert ON public.workforce_tasks';
-    EXECUTE 'CREATE POLICY workforce_cmd_insert ON public.workforce_tasks FOR INSERT TO sireader_workforce_cmd WITH CHECK (true)';
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_update ON public.workforce_tasks';
-    EXECUTE 'CREATE POLICY workforce_cmd_update ON public.workforce_tasks FOR UPDATE TO sireader_workforce_cmd USING (true) WITH CHECK (true)';
-
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_select ON public.workforce_task_attempts';
-    EXECUTE 'CREATE POLICY workforce_cmd_select ON public.workforce_task_attempts FOR SELECT TO sireader_workforce_cmd USING (true)';
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_update ON public.workforce_task_attempts';
-    EXECUTE 'CREATE POLICY workforce_cmd_update ON public.workforce_task_attempts FOR UPDATE TO sireader_workforce_cmd USING (true) WITH CHECK (true)';
-
     EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_insert ON public.workforce_activity_events';
-    EXECUTE 'CREATE POLICY workforce_cmd_insert ON public.workforce_activity_events FOR INSERT TO sireader_workforce_cmd WITH CHECK (true)';
+
+    EXECUTE 'ALTER TABLE public.workforce_workers ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.workforce_capabilities ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.workforce_worker_capabilities ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.workforce_tasks ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.workforce_task_attempts ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.workforce_activity_events ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.workforce_command_audit ENABLE ROW LEVEL SECURITY';
+
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_workers_select ON public.workforce_workers';
+    EXECUTE format('CREATE POLICY workforce_cmd_workers_select ON public.workforce_workers FOR SELECT TO sireader_workforce_cmd USING (%s)', worker_allow);
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_workers_update ON public.workforce_workers';
+    EXECUTE format('CREATE POLICY workforce_cmd_workers_update ON public.workforce_workers FOR UPDATE TO sireader_workforce_cmd USING (%s) WITH CHECK (%s)', worker_allow, worker_allow);
+
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_capabilities_select ON public.workforce_capabilities';
+    EXECUTE format('CREATE POLICY workforce_cmd_capabilities_select ON public.workforce_capabilities FOR SELECT TO sireader_workforce_cmd USING (%s)', capability_allow);
+
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_worker_capabilities_select ON public.workforce_worker_capabilities';
+    EXECUTE format('CREATE POLICY workforce_cmd_worker_capabilities_select ON public.workforce_worker_capabilities FOR SELECT TO sireader_workforce_cmd USING ((%s) AND (%s))', worker_allow, capability_allow);
+
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_tasks_select ON public.workforce_tasks';
+    EXECUTE format('CREATE POLICY workforce_cmd_tasks_select ON public.workforce_tasks FOR SELECT TO sireader_workforce_cmd USING (%s)', task_allow);
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_tasks_insert ON public.workforce_tasks';
+    EXECUTE format('CREATE POLICY workforce_cmd_tasks_insert ON public.workforce_tasks FOR INSERT TO sireader_workforce_cmd WITH CHECK (%s)', task_allow);
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_tasks_update ON public.workforce_tasks';
+    EXECUTE format('CREATE POLICY workforce_cmd_tasks_update ON public.workforce_tasks FOR UPDATE TO sireader_workforce_cmd USING (%s) WITH CHECK (%s)', task_allow, task_allow);
+
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_attempts_select ON public.workforce_task_attempts';
+    EXECUTE format(
+        'CREATE POLICY workforce_cmd_attempts_select ON public.workforce_task_attempts FOR SELECT TO sireader_workforce_cmd USING (worker_id IN (''supervisor'',''haiku'',''sonnet'',''opus'',''data_archivist'') AND %s)',
+        task_reference
+    );
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_attempts_update ON public.workforce_task_attempts';
+    EXECUTE format(
+        'CREATE POLICY workforce_cmd_attempts_update ON public.workforce_task_attempts FOR UPDATE TO sireader_workforce_cmd USING (worker_id IN (''supervisor'',''haiku'',''sonnet'',''opus'',''data_archivist'') AND %s) WITH CHECK (worker_id IN (''supervisor'',''haiku'',''sonnet'',''opus'',''data_archivist'') AND %s)',
+        task_reference, task_reference
+    );
+
+    EXECUTE 'DROP POLICY IF EXISTS workforce_cmd_activity_insert ON public.workforce_activity_events';
+    EXECUTE format(
+        'CREATE POLICY workforce_cmd_activity_insert ON public.workforce_activity_events FOR INSERT TO sireader_workforce_cmd WITH CHECK ((event_type = ''WORKER_STATE_CHANGED'' AND worker_id IN (''supervisor'',''haiku'',''sonnet'',''opus'',''data_archivist'') AND task_id IS NULL) OR (event_type IN (''TASK_ENQUEUED'',''TASK_CANCELLED'',''TASK_WAITING_REVIEW'') AND task_id IS NOT NULL AND (worker_id IS NULL OR worker_id IN (''supervisor'',''haiku'',''sonnet'',''opus'',''data_archivist'')) AND %s))',
+        activity_task_reference
+    );
 END;
 $policies$;
+
+DROP POLICY IF EXISTS workforce_cmd_audit_select ON public.workforce_command_audit;
+CREATE POLICY workforce_cmd_audit_select
+ON public.workforce_command_audit FOR SELECT TO sireader_workforce_cmd USING (actor_id = 'local_operator');
+DROP POLICY IF EXISTS workforce_cmd_audit_insert ON public.workforce_command_audit;
+CREATE POLICY workforce_cmd_audit_insert
+ON public.workforce_command_audit FOR INSERT TO sireader_workforce_cmd WITH CHECK (actor_id = 'local_operator');
 
 GRANT USAGE ON SCHEMA public TO sireader_workforce_cmd;
 GRANT SELECT ON public.workforce_workers, public.workforce_capabilities,

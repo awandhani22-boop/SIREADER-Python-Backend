@@ -6,6 +6,16 @@ DROP TRIGGER IF EXISTS sireader_command_audit_immutable ON public.workforce_comm
 DROP FUNCTION IF EXISTS public.sireader_reject_command_audit_mutation_v1();
 DROP POLICY IF EXISTS workforce_cmd_audit_select ON public.workforce_command_audit;
 DROP POLICY IF EXISTS workforce_cmd_audit_insert ON public.workforce_command_audit;
+DROP POLICY IF EXISTS workforce_cmd_workers_select ON public.workforce_workers;
+DROP POLICY IF EXISTS workforce_cmd_workers_update ON public.workforce_workers;
+DROP POLICY IF EXISTS workforce_cmd_capabilities_select ON public.workforce_capabilities;
+DROP POLICY IF EXISTS workforce_cmd_worker_capabilities_select ON public.workforce_worker_capabilities;
+DROP POLICY IF EXISTS workforce_cmd_tasks_select ON public.workforce_tasks;
+DROP POLICY IF EXISTS workforce_cmd_tasks_insert ON public.workforce_tasks;
+DROP POLICY IF EXISTS workforce_cmd_tasks_update ON public.workforce_tasks;
+DROP POLICY IF EXISTS workforce_cmd_attempts_select ON public.workforce_task_attempts;
+DROP POLICY IF EXISTS workforce_cmd_attempts_update ON public.workforce_task_attempts;
+DROP POLICY IF EXISTS workforce_cmd_activity_insert ON public.workforce_activity_events;
 DROP POLICY IF EXISTS workforce_cmd_select ON public.workforce_workers;
 DROP POLICY IF EXISTS workforce_cmd_update ON public.workforce_workers;
 DROP POLICY IF EXISTS workforce_cmd_select ON public.workforce_capabilities;
