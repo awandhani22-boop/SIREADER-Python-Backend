@@ -399,7 +399,7 @@ def test_postgres_effective_role_and_privilege_boundary(postgres_security_engine
 
         for view_name in VIEW_NAMES:
             rows = connection.execute(
-                text(f"SELECT * FROM public.{view_name} LIMIT 2")
+                text(f"SELECT * FROM public.{view_name} LIMIT 10")
             ).mappings().all()
             expected_rows = {
                 "v_api_workforce_workers": 7,
