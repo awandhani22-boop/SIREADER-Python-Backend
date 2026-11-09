@@ -386,3 +386,41 @@ def test_rate_limit_is_enforced_before_second_command_side_effect():
         assert worker.accepting_tasks is False
         assert len(db.scalars(select(WorkforceCommandAuditRecord)).all()) == 1
     engine.dispose()
+
+
+def test_command_api_rejects_oversized_chunked_and_declared_bodies_before_json_parsing(command_environment):
+    client, Session = command_environment
+    oversized = b"x" * (20 * 1024 + 1)
+
+    # TestClient sets Content-Length. Middleware must reject before FastAPI's
+    # JSON decoder or any command dependency can be reached.
+    response = client.post(
+        "/api/v1/commands/tasks/enqueue",
+        content=oversized,
+        headers={**AUTH, "Idempotency-Key": "command-body-limit-001", "Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+    with Session() as db:
+        assert db.scalar(select(WorkTaskRecord)) is None
+        assert db.scalar(select(WorkforceCommandAuditRecord)) is None
+
+
+def test_retry_rejects_attempt_with_provider_start_timestamp_without_request_id(command_environment):
+    client, Session = command_environment
+    task_id = _seed_task(
+        Session, task_id="task-reserved-001", idempotency_key="reserved-seed-001",
+        status="FAILED", attempt_status="FAILED",
+    )
+    with Session.begin() as db:
+        attempt = db.scalar(select(WorkTaskAttemptRecord).where(WorkTaskAttemptRecord.task_id == task_id))
+        attempt.provider_started_at = datetime.now(timezone.utc)
+
+    response = client.post(
+        "/api/v1/commands/tasks/retry",
+        json={"task_id": task_id},
+        headers={**AUTH, "Idempotency-Key": "command-retry-provider-started"},
+    )
+    assert response.status_code == 409
+    with Session() as db:
+        assert len(db.scalars(select(WorkTaskRecord)).all()) == 1
+        assert db.get(WorkTaskRecord, task_id).status == "FAILED"

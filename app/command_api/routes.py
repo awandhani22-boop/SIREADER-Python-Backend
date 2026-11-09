@@ -53,7 +53,7 @@ class EnqueueTaskRequest(StrictRequest):
     task_type: str = Field(min_length=2, max_length=64)
     title: str = Field(min_length=1, max_length=180)
     required_capability: str = Field(min_length=2, max_length=64)
-    requested_worker_id: str | None = Field(default=None, min_length=2, max_length=64)
+    requested_worker_id: str = Field(min_length=2, max_length=64)
     input_payload: dict = Field(default_factory=dict)
     priority: int = Field(default=50, ge=1, le=100)
     max_attempts: int = Field(default=2, ge=1, le=3)
@@ -78,7 +78,7 @@ class EnqueueTaskRequest(StrictRequest):
 
     @field_validator("requested_worker_id")
     @classmethod
-    def validate_eligible_worker(cls, value: str | None) -> str | None:
+    def validate_eligible_worker(cls, value: str) -> str:
         if value is not None and value not in ALLOWED_WORKERS:
             raise ValueError("requested_worker_id is not eligible for non-trading commands.")
         return value
@@ -277,6 +277,7 @@ def retry_failed_non_trading_task(
             last_attempt is None
             or last_attempt.status != "FAILED"
             or last_attempt.provider_request_id is not None
+            or last_attempt.provider_started_at is not None
             or last_attempt.attempt_number != original.attempts
         ):
             raise HTTPException(status_code=409, detail="TASK_PROVIDER_OUTCOME_NOT_CONFIRMED_SAFE")

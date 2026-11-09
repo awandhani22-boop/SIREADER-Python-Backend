@@ -12,7 +12,7 @@ from app.command_api.database import (
     validate_command_database_security,
 )
 from app.command_api.routes import router
-from app.command_api.security import SlidingWindowRateLimiter
+from app.command_api.security import RequestBodyLimitMiddleware, SlidingWindowRateLimiter
 
 
 def create_command_app(
@@ -75,4 +75,5 @@ def create_command_app(
         return await call_next(request)
 
     app.include_router(router)
+    app.add_middleware(RequestBodyLimitMiddleware, max_bytes=20 * 1024)
     return app
