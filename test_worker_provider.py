@@ -125,3 +125,63 @@ def test_pre_request_persistence_failure_is_known_and_safely_retryable(monkeypat
     assert error.value.code == "PROVIDER_STATE_PERSIST_FAILED"
     assert error.value.retryable is True
     assert error.value.outcome_unknown is False
+
+
+def _configure_live_provider(monkeypatch):
+    monkeypatch.setattr(settings, "AI_API_KEY", "test-only-placeholder")
+    monkeypatch.setattr(settings, "AI_BASE_URL", "http://127.0.0.1:20128/v1")
+    monkeypatch.setattr(settings, "WORKER_MAX_TASK_COST_RP", Decimal("3.00"))
+
+
+def test_budget_guard_rejection_is_known_and_never_retried(monkeypatch):
+    _configure_live_provider(monkeypatch)
+
+    def reject_budget(**_kwargs):
+        raise BudgetExceededError("per-task budget exceeded")
+
+    monkeypatch.setattr(omniroute_client, "call_ai", reject_budget)
+    with pytest.raises(WorkerProviderError) as error:
+        OmniRouteWorkerProvider().execute(build_default_registry()["haiku"], _request())
+
+    assert error.value.code == "BUDGET_BLOCKED"
+    assert error.value.outcome_unknown is False
+    assert error.value.retryable is False
+
+
+@pytest.mark.parametrize("failure", [
+    TimeoutError("provider timed out"),
+    omniroute_client.AIRequestError("provider rejected after dispatch", definitely_not_charged=False),
+])
+def test_provider_timeout_or_post_dispatch_error_is_unknown_and_not_retryable(monkeypatch, failure):
+    _configure_live_provider(monkeypatch)
+
+    def fail_after_dispatch(**_kwargs):
+        raise failure
+
+    monkeypatch.setattr(omniroute_client, "call_ai", fail_after_dispatch)
+    with pytest.raises(WorkerProviderError) as error:
+        OmniRouteWorkerProvider().execute(build_default_registry()["haiku"], _request())
+
+    assert error.value.code == "PROVIDER_OUTCOME_UNKNOWN"
+    assert error.value.outcome_unknown is True
+    assert error.value.retryable is False
+
+
+def test_provider_success_without_usage_is_unknown_and_not_retried(monkeypatch):
+    _configure_live_provider(monkeypatch)
+    monkeypatch.setattr(omniroute_client, "call_ai", lambda **kwargs: {
+        "content": "completed but usage missing",
+        "tier": "FAST",
+        "model": "tokenmurah/claude-haiku-4-5-20251001",
+        "request_id": kwargs["request_id"],
+        "billing_currency": "IDR",
+        "cost": Decimal("0.001"),
+        "usage": None,
+    })
+
+    with pytest.raises(WorkerProviderError) as error:
+        OmniRouteWorkerProvider().execute(build_default_registry()["haiku"], _request())
+
+    assert error.value.code == "PROVIDER_USAGE_UNAVAILABLE"
+    assert error.value.outcome_unknown is True
+    assert error.value.retryable is False
