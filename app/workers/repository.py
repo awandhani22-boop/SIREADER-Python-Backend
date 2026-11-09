@@ -71,7 +71,7 @@ def _append_event(db: Session, *, event_type: ActivityEventType, correlation_id:
 
 
 def sync_default_registry(db: Session) -> int:
-    """Idempotently upsert the seven canonical definitions and 28 capability links."""
+    """Idempotently upsert the seven canonical definitions and 29 worker-capability assignments."""
     registry = build_default_registry()
     now = datetime.now(timezone.utc)
     capability_ids = {capability_id for worker in registry.values() for capability_id in worker.capability_ids}
