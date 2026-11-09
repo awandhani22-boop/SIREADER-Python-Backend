@@ -1,6 +1,6 @@
 # Phase 5.1 — Workforce Command API Security Design
 
-**Status:** implementation baseline  
+**Status:** implementation + disposable PostgreSQL CI PASS; owner local setup pending  
 **Branch:** `phase-5-implementation`  
 **Parent:** Phase 4 accepted baseline  
 **Deployment:** local/disposable test only until separately reviewed.
