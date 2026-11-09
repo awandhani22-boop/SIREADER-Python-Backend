@@ -74,6 +74,7 @@ class WorkTaskRecord(Base):
         CheckConstraint("priority BETWEEN 1 AND 100", name="ck_workforce_task_priority"),
         CheckConstraint("attempts >= 0 AND max_attempts BETWEEN 1 AND 10", name="ck_workforce_task_attempts"),
         CheckConstraint("status IN ('QUEUED', 'CLAIMED', 'RUNNING', 'RETRY_WAIT', 'WAITING_REVIEW', 'COMPLETED', 'FAILED', 'CANCELLED', 'DEAD_LETTERED')", name="ck_workforce_task_status"),
+        CheckConstraint("payload_purged_at IS NULL OR (input_payload = '{}'::jsonb AND result_payload IS NULL)", name="ck_workforce_task_payload_purged_empty"),
         Index("ix_workforce_task_queue", "status", "not_before", "priority", "created_at"),
         Index("ix_workforce_task_worker_status", "assigned_worker_id", "status"),
     )
@@ -101,7 +102,7 @@ class WorkTaskRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    payload_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    payload_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payload_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.workers.retention_settings import retention_settings
 from app.workers.models import (
     WorkActivityEventRecord, WorkTaskAttemptRecord, WorkTaskRecord,
     WorkerCapabilityAssignmentRecord, WorkerCapabilityRecord,
@@ -52,9 +52,9 @@ def _now(value: datetime | None = None) -> datetime:
 
 def _payload_expiry_for_status(status: TaskStatus, stamp: datetime) -> datetime | None:
     if status is TaskStatus.WAITING_REVIEW:
-        retention_days = int(settings.WORKER_REVIEW_PAYLOAD_RETENTION_DAYS)
+        retention_days = int(retention_settings.WORKER_REVIEW_PAYLOAD_RETENTION_DAYS)
     elif is_terminal_task_status(status):
-        retention_days = int(settings.WORKER_TASK_PAYLOAD_RETENTION_DAYS)
+        retention_days = int(retention_settings.WORKER_TASK_PAYLOAD_RETENTION_DAYS)
     else:
         return None
     if not 1 <= retention_days <= 365:

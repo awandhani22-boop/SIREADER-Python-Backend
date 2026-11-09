@@ -88,8 +88,7 @@ CREATE TABLE IF NOT EXISTS public.workforce_tasks (
     completed_at timestamptz,
     payload_expires_at timestamptz,
     payload_purged_at timestamptz,
-    CHECK (deadline_at IS NULL OR deadline_at > created_at),
-    CHECK (payload_purged_at IS NULL OR (input_payload = '{}'::jsonb AND result_payload IS NULL))
+    CHECK (deadline_at IS NULL OR deadline_at > created_at)
 );
 -- Keep reapplication safe for disposable databases created by an earlier
 -- Phase 4 migration revision.
