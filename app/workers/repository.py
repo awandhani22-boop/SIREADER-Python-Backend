@@ -5,6 +5,7 @@ This module is deliberately separate from Telegram analysis and trading executio
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from json import dumps
 from uuid import uuid4
@@ -29,6 +30,8 @@ from app.governance.review_policy import evaluate_review_eligibility
 from app.ai.sanitizer import (
     sanitize_review_payload, canonical_sha256, validate_review_payload_size,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_PAYLOAD_BYTES = 64 * 1024
 MAX_LEASE_SECONDS = 600
@@ -703,13 +706,16 @@ def purge_expired_task_payloads(
     try:
         from sqlalchemy import inspect
         bind = db.get_bind()
-        if inspect(bind).has_table("workforce_task_reviews"):
-            pending_review_tasks = select(WorkforceTaskReviewRecord.task_id).where(
-                WorkforceTaskReviewRecord.status == ReviewStatus.PENDING.value
-            )
-            filters.append(WorkTaskRecord.task_id.not_in(pending_review_tasks))
-    except Exception:
-        pass
+        table_exists = inspect(bind).has_table("workforce_task_reviews")
+    except Exception as exc:
+        logger.error("Failed to inspect workforce_task_reviews table for purge protection: %s", exc)
+        raise WorkforceRepositoryError("Cannot purge task payloads: review subsystem inspection failed") from exc
+
+    if table_exists:
+        pending_review_tasks = select(WorkforceTaskReviewRecord.task_id).where(
+            WorkforceTaskReviewRecord.status == ReviewStatus.PENDING.value
+        )
+        filters.append(WorkTaskRecord.task_id.not_in(pending_review_tasks))
 
     rows = db.execute(
         select(WorkTaskRecord).where(

@@ -39,6 +39,7 @@ from app.workers.models import (
 )
 from app.workers.registry import CAPABILITY_CATALOG
 from app.workers.repository import (
+    WorkforceRepositoryError,
     claim_next_task,
     complete_task,
     enqueue_task,
@@ -89,11 +90,8 @@ def db_engine():
         if not has_related_task:
             admin.execute((root / "migrations" / "2026_11_09_workforce_timeline_v2.sql").read_text(encoding="utf-8"))
 
-        has_reviews = admin.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'workforce_task_reviews'").fetchone()
-        has_cmd_audit = admin.execute("SELECT check_clause FROM information_schema.check_constraints WHERE constraint_name = 'workforce_command_audit_command_type_check'").fetchone()
-        needs_migration = not has_reviews or (has_cmd_audit and "REVIEW_ADJUDICATE" not in has_cmd_audit[0])
-        if needs_migration:
-            admin.execute((root / "migrations" / "2026_11_10_workforce_reviews_v1.sql").read_text(encoding="utf-8"))
+        # Always apply the review migration to ensure latest triggers and constraints are in place
+        admin.execute((root / "migrations" / "2026_11_10_workforce_reviews_v1.sql").read_text(encoding="utf-8"))
 
     engine = create_engine(DATABASE_URL, echo=False)
     yield engine
@@ -178,15 +176,15 @@ def test_payload_size_boundary_enforcement():
 # -----------------------------------------------------------------------------
 
 def test_review_policy_exhaustive_mapping_with_capability_catalog():
-    """Verify that every capability and its task types are accounted for."""
+    """Verify that every capability and its task types are accounted for without skipping."""
     for capability_id, contract in CAPABILITY_CATALOG.items():
         if capability_id in TRADING_RELATED_CAPABILITIES:
             for tt in contract.task_types:
                 assert evaluate_review_eligibility(capability_id, tt, "task_123") is False
-        elif (capability_id, contract.task_types[0]) in REVIEW_POLICY_CATALOG:
+        else:
             for tt in contract.task_types:
                 rule = REVIEW_POLICY_CATALOG.get((capability_id, tt))
-                assert rule is not None, f"Missing mapping for ({capability_id}, {tt})"
+                assert rule is not None, f"Missing policy mapping for non-trading pair ({capability_id}, {tt})"
                 assert rule.mode in (ReviewTriggerMode.MANDATORY, ReviewTriggerMode.SAMPLE, ReviewTriggerMode.NONE)
 
 
@@ -681,3 +679,418 @@ def test_command_audit_constraint_accepts_review_adjudicate(db_session: Session)
     )
     assert reloaded is not None
     assert reloaded.command_type == "REVIEW_ADJUDICATE"
+
+
+# -----------------------------------------------------------------------------
+# Unit 4: Hardening Integrity Tests (ChatGPT 5.2.2-B Directive)
+# -----------------------------------------------------------------------------
+
+def test_db_retention_purge_guard_before_task_expiry_rejected(db_session: Session):
+    now = datetime.now(timezone.utc)
+    task_id = f"task_{uuid4().hex[:12]}"
+    attempt_id = f"att_{uuid4().hex[:12]}"
+    review_id = f"rev_{uuid4().hex[:12]}"
+
+    task = WorkTaskRecord(
+        task_id=task_id,
+        idempotency_key=f"idem_{uuid4().hex[:12]}",
+        correlation_id=f"corr_{uuid4().hex[:12]}",
+        task_type="EVALUATION",
+        title="Premature Purge Test",
+        required_capability="evaluation",
+        status=TaskStatus.COMPLETED.value,
+        payload_expires_at=now + timedelta(days=30),
+    )
+    db_session.add(task)
+    db_session.flush()
+
+    attempt = WorkTaskAttemptRecord(
+        attempt_id=attempt_id,
+        task_id=task_id,
+        attempt_number=1,
+        worker_id="sonnet",
+        lease_token=f"lt_{uuid4().hex[:12]}",
+        status=AttemptStatus.COMPLETED.value,
+    )
+    db_session.add(attempt)
+    db_session.flush()
+
+    rev = WorkforceTaskReviewRecord(
+        review_id=review_id,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        status=ReviewStatus.APPROVED.value,
+        original_output_sha256="a" * 64,
+        adjudicated_by="operator_dan",
+        adjudicated_at=now,
+        review_expires_at=now + timedelta(hours=24),
+    )
+    db_session.add(rev)
+    db_session.flush()
+
+    payload = WorkforceTaskReviewPayloadRecord(
+        review_id=review_id,
+        original_output={"report": "classified"},
+    )
+    db_session.add(payload)
+    db_session.commit()
+
+    with pytest.raises(Exception, match="before parent task expiration"):
+        db_session.execute(
+            text(
+                "UPDATE public.workforce_task_review_payloads "
+                "SET original_output = NULL, adjusted_output = NULL, payload_purged_at = now() "
+                "WHERE review_id = :rid"
+            ),
+            {"rid": review_id},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_db_retention_purge_guard_pending_review_rejected(db_session: Session):
+    now = datetime.now(timezone.utc)
+    task_id = f"task_{uuid4().hex[:12]}"
+    attempt_id = f"att_{uuid4().hex[:12]}"
+    review_id = f"rev_{uuid4().hex[:12]}"
+
+    task = WorkTaskRecord(
+        task_id=task_id,
+        idempotency_key=f"idem_{uuid4().hex[:12]}",
+        correlation_id=f"corr_{uuid4().hex[:12]}",
+        task_type="EVALUATION",
+        title="Pending Purge Test",
+        required_capability="evaluation",
+        status=TaskStatus.COMPLETED.value,
+        payload_expires_at=now - timedelta(days=1),
+    )
+    db_session.add(task)
+    db_session.flush()
+
+    attempt = WorkTaskAttemptRecord(
+        attempt_id=attempt_id,
+        task_id=task_id,
+        attempt_number=1,
+        worker_id="sonnet",
+        lease_token=f"lt_{uuid4().hex[:12]}",
+        status=AttemptStatus.COMPLETED.value,
+    )
+    db_session.add(attempt)
+    db_session.flush()
+
+    rev = WorkforceTaskReviewRecord(
+        review_id=review_id,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        status=ReviewStatus.PENDING.value,
+        original_output_sha256="b" * 64,
+        review_expires_at=now + timedelta(hours=24),
+    )
+    db_session.add(rev)
+    db_session.flush()
+
+    payload = WorkforceTaskReviewPayloadRecord(
+        review_id=review_id,
+        original_output={"report": "under_review"},
+    )
+    db_session.add(payload)
+    db_session.commit()
+
+    with pytest.raises(Exception, match="Cannot purge payloads for active review"):
+        db_session.execute(
+            text(
+                "UPDATE public.workforce_task_review_payloads "
+                "SET original_output = NULL, adjusted_output = NULL, payload_purged_at = now() "
+                "WHERE review_id = :rid"
+            ),
+            {"rid": review_id},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_db_retention_purge_and_anti_resurrection(db_session: Session):
+    now = datetime.now(timezone.utc)
+    task_id = f"task_{uuid4().hex[:12]}"
+    attempt_id = f"att_{uuid4().hex[:12]}"
+    review_id = f"rev_{uuid4().hex[:12]}"
+
+    task = WorkTaskRecord(
+        task_id=task_id,
+        idempotency_key=f"idem_{uuid4().hex[:12]}",
+        correlation_id=f"corr_{uuid4().hex[:12]}",
+        task_type="EVALUATION",
+        title="Purge Success Test",
+        required_capability="evaluation",
+        status=TaskStatus.COMPLETED.value,
+        payload_expires_at=now - timedelta(days=2),
+    )
+    db_session.add(task)
+    db_session.flush()
+
+    attempt = WorkTaskAttemptRecord(
+        attempt_id=attempt_id,
+        task_id=task_id,
+        attempt_number=1,
+        worker_id="sonnet",
+        lease_token=f"lt_{uuid4().hex[:12]}",
+        status=AttemptStatus.COMPLETED.value,
+    )
+    db_session.add(attempt)
+    db_session.flush()
+
+    rev = WorkforceTaskReviewRecord(
+        review_id=review_id,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        status=ReviewStatus.APPROVED.value,
+        original_output_sha256="c" * 64,
+        adjudicated_by="operator_dan",
+        adjudicated_at=now - timedelta(days=2),
+        review_expires_at=now + timedelta(hours=24),
+    )
+    db_session.add(rev)
+    db_session.flush()
+
+    payload = WorkforceTaskReviewPayloadRecord(
+        review_id=review_id,
+        original_output={"data": "to_be_purged"},
+    )
+    db_session.add(payload)
+    db_session.commit()
+
+    # 1. Purge succeeds for terminal review after task expiry
+    db_session.execute(
+        text(
+            "UPDATE public.workforce_task_review_payloads "
+            "SET original_output = NULL, adjusted_output = NULL, payload_purged_at = now() "
+            "WHERE review_id = :rid"
+        ),
+        {"rid": review_id},
+    )
+    db_session.commit()
+
+    purged_rec = db_session.get(WorkforceTaskReviewPayloadRecord, review_id)
+    assert purged_rec.original_output is None
+    assert purged_rec.payload_purged_at is not None
+
+    # 2. Second purge is rejected
+    with pytest.raises(Exception, match="Purged review payload cannot be modified or restored"):
+        db_session.execute(
+            text(
+                "UPDATE public.workforce_task_review_payloads "
+                "SET payload_purged_at = now() "
+                "WHERE review_id = :rid"
+            ),
+            {"rid": review_id},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+    # 3. Restoring payload after purge is rejected
+    with pytest.raises(Exception, match="Purged review payload cannot be modified or restored"):
+        db_session.execute(
+            text(
+                "UPDATE public.workforce_task_review_payloads "
+                "SET original_output = '{\"resurrected\": true}'::jsonb "
+                "WHERE review_id = :rid"
+            ),
+            {"rid": review_id},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_db_adjusted_output_state_guard(db_session: Session):
+    now = datetime.now(timezone.utc)
+    task_id = f"task_{uuid4().hex[:12]}"
+    attempt_id = f"att_{uuid4().hex[:12]}"
+    review_id = f"rev_{uuid4().hex[:12]}"
+
+    task = WorkTaskRecord(
+        task_id=task_id,
+        idempotency_key=f"idem_{uuid4().hex[:12]}",
+        correlation_id=f"corr_{uuid4().hex[:12]}",
+        task_type="EVALUATION",
+        title="Adjusted Guard Test",
+        required_capability="evaluation",
+        status=TaskStatus.COMPLETED.value,
+        payload_expires_at=now + timedelta(days=30),
+    )
+    db_session.add(task)
+    db_session.flush()
+
+    attempt = WorkTaskAttemptRecord(
+        attempt_id=attempt_id,
+        task_id=task_id,
+        attempt_number=1,
+        worker_id="sonnet",
+        lease_token=f"lt_{uuid4().hex[:12]}",
+        status=AttemptStatus.COMPLETED.value,
+    )
+    db_session.add(attempt)
+    db_session.flush()
+
+    rev = WorkforceTaskReviewRecord(
+        review_id=review_id,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        status=ReviewStatus.PENDING.value,
+        original_output_sha256="d" * 64,
+        review_expires_at=now + timedelta(hours=24),
+    )
+    db_session.add(rev)
+    db_session.flush()
+
+    payload = WorkforceTaskReviewPayloadRecord(
+        review_id=review_id,
+        original_output={"report": "draft"},
+    )
+    db_session.add(payload)
+    db_session.commit()
+
+    # 1. Writing adjusted_output while review is PENDING must be rejected
+    with pytest.raises(Exception, match="Adjusted review output can only be written for reviews in EDITED status"):
+        db_session.execute(
+            text(
+                "UPDATE public.workforce_task_review_payloads "
+                "SET adjusted_output = '{\"edit\": 1}'::jsonb "
+                "WHERE review_id = :rid"
+            ),
+            {"rid": review_id},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+    # 2. Writing adjusted_output when review is APPROVED must be rejected
+    db_session.execute(
+        text(
+            "UPDATE public.workforce_task_reviews "
+            "SET status = 'APPROVED', adjudicated_by = 'op', adjudicated_at = now() "
+            "WHERE review_id = :rid"
+        ),
+        {"rid": review_id},
+    )
+    db_session.commit()
+
+    with pytest.raises(Exception, match="Adjusted review output can only be written for reviews in EDITED status"):
+        db_session.execute(
+            text(
+                "UPDATE public.workforce_task_review_payloads "
+                "SET adjusted_output = '{\"edit\": 1}'::jsonb "
+                "WHERE review_id = :rid"
+            ),
+            {"rid": review_id},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+    # 3. Create a fresh review to test EDITED transition
+    rev_edit_id = f"rev_{uuid4().hex[:12]}"
+    task_edit_id = f"task_{uuid4().hex[:12]}"
+    att_edit_id = f"att_{uuid4().hex[:12]}"
+
+    task_edit = WorkTaskRecord(
+        task_id=task_edit_id,
+        idempotency_key=f"idem_{uuid4().hex[:12]}",
+        correlation_id=f"corr_{uuid4().hex[:12]}",
+        task_type="EVALUATION",
+        title="Edit Success Test",
+        required_capability="evaluation",
+        status=TaskStatus.COMPLETED.value,
+        payload_expires_at=now + timedelta(days=30),
+    )
+    db_session.add(task_edit)
+    db_session.flush()
+
+    att_edit = WorkTaskAttemptRecord(
+        attempt_id=att_edit_id,
+        task_id=task_edit_id,
+        attempt_number=1,
+        worker_id="sonnet",
+        lease_token=f"lt_{uuid4().hex[:12]}",
+        status=AttemptStatus.COMPLETED.value,
+    )
+    db_session.add(att_edit)
+    db_session.flush()
+
+    rev_edit = WorkforceTaskReviewRecord(
+        review_id=rev_edit_id,
+        task_id=task_edit_id,
+        attempt_id=att_edit_id,
+        status=ReviewStatus.PENDING.value,
+        original_output_sha256="1" * 64,
+        review_expires_at=now + timedelta(hours=24),
+    )
+    db_session.add(rev_edit)
+    db_session.flush()
+
+    payload_edit = WorkforceTaskReviewPayloadRecord(
+        review_id=rev_edit_id,
+        original_output={"original": "text"},
+    )
+    db_session.add(payload_edit)
+    db_session.commit()
+
+    # Update review to EDITED first
+    db_session.execute(
+        text(
+            "UPDATE public.workforce_task_reviews "
+            "SET status = 'EDITED', adjusted_output_sha256 = :adj_sha, adjudicated_by = 'op', adjudicated_at = now() "
+            "WHERE review_id = :rid"
+        ),
+        {"rid": rev_edit_id, "adj_sha": "2" * 64},
+    )
+    # Then write adjusted_output -> MUST SUCCEED
+    db_session.execute(
+        text(
+            "UPDATE public.workforce_task_review_payloads "
+            "SET adjusted_output = '{\"edited\": true}'::jsonb "
+            "WHERE review_id = :rid"
+        ),
+        {"rid": rev_edit_id},
+    )
+    db_session.commit()
+
+    # 4. Modifying adjusted_output a second time must fail (write-once)
+    with pytest.raises(Exception, match="Adjusted review output is write-once"):
+        db_session.execute(
+            text(
+                "UPDATE public.workforce_task_review_payloads "
+                "SET adjusted_output = '{\"modified_again\": true}'::jsonb "
+                "WHERE review_id = :rid"
+            ),
+            {"rid": rev_edit_id},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_fail_closed_purge_inspection(db_session: Session, monkeypatch):
+    import sqlalchemy
+    def broken_inspect(bind):
+        raise RuntimeError("Simulated connection timeout during inspection")
+
+    monkeypatch.setattr(sqlalchemy, "inspect", broken_inspect)
+    with pytest.raises(WorkforceRepositoryError, match="review subsystem inspection failed"):
+        purge_expired_task_payloads(db_session)
+
+
+def test_migration_forward_rollback_forward_lifecycle():
+    root = Path(__file__).resolve().parents[2]
+    conn_url = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
+    mig = (root / "migrations" / "2026_11_10_workforce_reviews_v1.sql").read_text(encoding="utf-8")
+    rb = (root / "migrations" / "2026_11_10_workforce_reviews_v1_rollback.sql").read_text(encoding="utf-8")
+
+    with psycopg.connect(conn_url, autocommit=True) as conn:
+        conn.execute(rb)
+        exists = conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'workforce_task_reviews'"
+        ).fetchone()
+        assert exists is None
+
+        conn.execute(mig)
+        recreated = conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'workforce_task_reviews'"
+        ).fetchone()
+        assert recreated is not None

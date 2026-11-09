@@ -18,6 +18,7 @@ from app.workers.repository import (
     claim_next_task, complete_task, fail_task, heartbeat_worker,
     mark_provider_requested, recover_expired_leases, renew_task_lease,
     start_task, expire_deadline_tasks, purge_expired_task_payloads,
+    expire_stale_reviews, purge_expired_review_payloads,
 )
 from app.workers.runtime_contract import WorkerContract, WorkerHeartbeatContract, WorkerProcessState
 
@@ -174,6 +175,8 @@ def run_worker_once(
                 recover_expired_leases(db, now=now)
                 expire_deadline_tasks(db, now=now)
                 purge_expired_task_payloads(db, now=now)
+                expire_stale_reviews(db, now=now)
+                purge_expired_review_payloads(db, now=now)
                 _last_maintenance_at = now
             claimed = claim_next_task(
                 db, worker_id=worker_id, instance_id=instance_id,

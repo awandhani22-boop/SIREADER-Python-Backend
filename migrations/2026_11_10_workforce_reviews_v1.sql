@@ -122,6 +122,7 @@ CREATE OR REPLACE FUNCTION public.sireader_guard_review_payloads_v1()
 RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE
     r_status varchar(24);
+    t_expires_at timestamptz;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'workforce_task_review_payloads records cannot be deleted; use retention purge';
@@ -137,18 +138,38 @@ BEGIN
         IF NEW.original_output IS NOT NULL OR NEW.adjusted_output IS NOT NULL THEN
             RAISE EXCEPTION 'Purging requires original_output and adjusted_output to be NULL.';
         END IF;
-        SELECT status INTO r_status FROM public.workforce_task_reviews WHERE review_id = OLD.review_id;
+
+        SELECT r.status, t.payload_expires_at INTO r_status, t_expires_at
+        FROM public.workforce_task_reviews r
+        JOIN public.workforce_tasks t ON t.task_id = r.task_id
+        WHERE r.review_id = OLD.review_id;
+
         IF r_status NOT IN ('APPROVED', 'EDITED', 'REJECTED', 'EXPIRED') THEN
             RAISE EXCEPTION 'Cannot purge payloads for active review % in status %.', OLD.review_id, r_status;
         END IF;
+
+        IF t_expires_at IS NULL OR t_expires_at > clock_timestamp() THEN
+            RAISE EXCEPTION 'Cannot purge review payload before parent task expiration (expires at: %).', t_expires_at;
+        END IF;
+
+        -- Database independently timestamps the purge; callers cannot pass arbitrary timestamp
+        NEW.payload_purged_at = clock_timestamp();
     ELSE
-        -- Not purging: original_output is immutable
+        -- Not purging: original_output is strictly immutable
         IF OLD.original_output IS NOT NULL AND NEW.original_output IS DISTINCT FROM OLD.original_output THEN
             RAISE EXCEPTION 'Original review output is immutable.';
         END IF;
-        -- adjusted_output is write-once
+
+        -- adjusted_output is write-once and can ONLY be introduced when review is in EDITED status
         IF OLD.adjusted_output IS NOT NULL AND NEW.adjusted_output IS DISTINCT FROM OLD.adjusted_output THEN
             RAISE EXCEPTION 'Adjusted review output is write-once.';
+        END IF;
+
+        IF OLD.adjusted_output IS NULL AND NEW.adjusted_output IS NOT NULL THEN
+            SELECT status INTO r_status FROM public.workforce_task_reviews WHERE review_id = OLD.review_id;
+            IF r_status IS DISTINCT FROM 'EDITED' THEN
+                RAISE EXCEPTION 'Adjusted review output can only be written for reviews in EDITED status (current status: %)', r_status;
+            END IF;
         END IF;
     END IF;
 
@@ -220,7 +241,14 @@ REVOKE ALL ON public.workforce_task_reviews FROM public, sireader_api_ro;
 REVOKE ALL ON public.workforce_task_review_payloads FROM public, sireader_api_ro;
 
 GRANT SELECT ON public.v_api_workforce_task_reviews TO sireader_api_ro;
-GRANT SELECT, INSERT, UPDATE ON public.workforce_task_reviews TO sireader_workforce_cmd;
-GRANT SELECT, INSERT, UPDATE ON public.workforce_task_review_payloads TO sireader_workforce_cmd;
+
+-- Command role: least privilege for review adjudication
+GRANT SELECT, INSERT ON public.workforce_task_reviews TO sireader_workforce_cmd;
+GRANT UPDATE (status, adjusted_output_sha256, adjudicated_by, adjudicated_at, reason_code, notes, updated_at)
+    ON public.workforce_task_reviews TO sireader_workforce_cmd;
+
+GRANT SELECT, INSERT ON public.workforce_task_review_payloads TO sireader_workforce_cmd;
+GRANT UPDATE (adjusted_output, updated_at)
+    ON public.workforce_task_review_payloads TO sireader_workforce_cmd;
 
 COMMIT;

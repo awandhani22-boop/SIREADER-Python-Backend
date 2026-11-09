@@ -31,6 +31,18 @@ class CapabilityReviewRule:
 
 # Exhaustive mapping for all non-trading review capabilities in CAPABILITY_CATALOG
 REVIEW_POLICY_CATALOG: dict[tuple[str, str], CapabilityReviewRule] = {
+    # Supervisor coordination capabilities
+    ("instruction_intake", "INSTRUCTION_INTAKE"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 10),
+    ("instruction_intake", "ROUTING"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 10),
+    ("task_decomposition", "TASK_DECOMPOSITION"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 15),
+    ("task_decomposition", "ROUTING"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 15),
+    ("workflow_supervision", "WORKFLOW_SUPERVISION"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 20),
+    ("workflow_supervision", "ROUTING"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 20),
+    ("task_assignment_oversight", "TASK_ASSIGNMENT_OVERSIGHT"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 15),
+    ("task_assignment_oversight", "ROUTING"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 15),
+    ("result_review", "RESULT_REVIEW"): CapabilityReviewRule(ReviewTriggerMode.MANDATORY),
+    ("result_review", "REVIEW"): CapabilityReviewRule(ReviewTriggerMode.MANDATORY),
+
     # Haiku research capabilities
     ("quick_research", "QUICK_RESEARCH"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 20),
     ("quick_research", "RESEARCH"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 20),
@@ -38,6 +50,8 @@ REVIEW_POLICY_CATALOG: dict[tuple[str, str], CapabilityReviewRule] = {
     ("information_extraction", "CLASSIFICATION"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 10),
     ("summarization", "SUMMARIZATION"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 15),
     ("summarization", "CLASSIFICATION"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 15),
+    ("lightweight_classification", "LIGHTWEIGHT_CLASSIFICATION"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 10),
+    ("lightweight_classification", "CLASSIFICATION"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 10),
 
     # Sonnet analysis capabilities
     ("data_analysis", "DATA_ANALYSIS"): CapabilityReviewRule(ReviewTriggerMode.SAMPLE, 25),
@@ -57,9 +71,15 @@ REVIEW_POLICY_CATALOG: dict[tuple[str, str], CapabilityReviewRule] = {
     ("deep_review", "DEEP_REVIEW"): CapabilityReviewRule(ReviewTriggerMode.MANDATORY),
     ("deep_review", "ESCALATION"): CapabilityReviewRule(ReviewTriggerMode.MANDATORY),
 
-    # Data archiving
+    # Data archiving & organization
     ("data_archiving", "DATA_ARCHIVING"): CapabilityReviewRule(ReviewTriggerMode.NONE),
     ("data_archiving", "ARCHIVAL"): CapabilityReviewRule(ReviewTriggerMode.NONE),
+    ("artifact_indexing", "ARTIFACT_INDEXING"): CapabilityReviewRule(ReviewTriggerMode.NONE),
+    ("artifact_indexing", "ARCHIVAL"): CapabilityReviewRule(ReviewTriggerMode.NONE),
+    ("historical_retrieval_simulation", "HISTORICAL_RETRIEVAL_SIMULATION"): CapabilityReviewRule(ReviewTriggerMode.NONE),
+    ("historical_retrieval_simulation", "ARCHIVAL"): CapabilityReviewRule(ReviewTriggerMode.NONE),
+    ("data_organization", "DATA_ORGANIZATION"): CapabilityReviewRule(ReviewTriggerMode.NONE),
+    ("data_organization", "ARCHIVAL"): CapabilityReviewRule(ReviewTriggerMode.NONE),
 }
 
 # Explicit hard ban: trading operations are strictly decoupled from human output review
