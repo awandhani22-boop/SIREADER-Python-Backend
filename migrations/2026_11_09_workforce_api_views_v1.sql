@@ -50,11 +50,30 @@ SELECT
     ), '[]'::jsonb) AS capability_ids
 FROM public.workforce_workers AS w
 LEFT JOIN LATERAL (
-    SELECT process_state, heartbeat_at, active_task_count, in_flight_provider_requests
+    -- A logical worker may have more than one OS process instance. Keep the
+    -- process state from any fresh READY instance, while aggregating counters
+    -- across every fresh instance. Stale instances must not contribute activity.
+    SELECT
+        CASE
+            WHEN COALESCE(bool_or(
+                process_state = 'READY'
+                AND heartbeat_at >= now() - interval '60 seconds'
+            ), false) THEN 'READY'
+            WHEN COALESCE(bool_or(
+                process_state = 'STARTING'
+                AND heartbeat_at >= now() - interval '60 seconds'
+            ), false) THEN 'STARTING'
+            ELSE (array_agg(process_state ORDER BY heartbeat_at DESC))[1]
+        END AS process_state,
+        MAX(heartbeat_at) AS heartbeat_at,
+        COALESCE(SUM(active_task_count) FILTER (
+            WHERE heartbeat_at >= now() - interval '60 seconds'
+        ), 0)::integer AS active_task_count,
+        COALESCE(SUM(in_flight_provider_requests) FILTER (
+            WHERE heartbeat_at >= now() - interval '60 seconds'
+        ), 0)::integer AS in_flight_provider_requests
     FROM public.workforce_heartbeats
     WHERE worker_id = w.worker_id
-    ORDER BY heartbeat_at DESC
-    LIMIT 1
 ) AS h ON true;
 
 CREATE OR REPLACE VIEW public.v_api_workforce_tasks
