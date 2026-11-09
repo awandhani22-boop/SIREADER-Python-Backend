@@ -25,6 +25,15 @@ SELECT
     w.enabled,
     w.max_concurrency,
     w.model_tier,
+    COALESCE((
+        SELECT jsonb_agg(wc.capability_id ORDER BY wc.capability_id)
+        FROM public.workforce_worker_capabilities AS wc
+        JOIN public.workforce_capabilities AS c
+          ON c.capability_id = wc.capability_id
+        WHERE wc.worker_id = w.worker_id
+          AND wc.enabled
+          AND c.enabled
+    ), '[]'::jsonb) AS capability_ids,
     CASE
         WHEN NOT w.enabled THEN 'DISABLED'
         WHEN h.heartbeat_at IS NULL THEN 'OFFLINE'
