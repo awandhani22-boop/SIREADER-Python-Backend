@@ -74,7 +74,7 @@ class WorkTaskRecord(Base):
         CheckConstraint("priority BETWEEN 1 AND 100", name="ck_workforce_task_priority"),
         CheckConstraint("attempts >= 0 AND max_attempts BETWEEN 1 AND 10", name="ck_workforce_task_attempts"),
         CheckConstraint("status IN ('QUEUED', 'CLAIMED', 'RUNNING', 'RETRY_WAIT', 'WAITING_REVIEW', 'COMPLETED', 'FAILED', 'CANCELLED', 'DEAD_LETTERED')", name="ck_workforce_task_status"),
-        CheckConstraint("payload_purged_at IS NULL OR (input_payload = '{}' AND result_payload IS NULL)", name="ck_workforce_task_payload_purged_empty"),
+        CheckConstraint("payload_purged_at IS NULL OR (input_payload = '{}' AND result_payload IS NULL AND status IN ('WAITING_REVIEW', 'COMPLETED', 'FAILED', 'CANCELLED', 'DEAD_LETTERED'))", name="ck_workforce_task_payload_purged_empty"),
         Index("ix_workforce_task_queue", "status", "not_before", "priority", "created_at"),
         Index("ix_workforce_task_worker_status", "assigned_worker_id", "status"),
     )

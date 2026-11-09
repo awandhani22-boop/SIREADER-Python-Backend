@@ -312,6 +312,18 @@ def test_workforce_migration_security_and_task_lifecycle():
                 assert review.input_payload == {}
                 assert review.payload_purged_at is not None
 
+            # A purged task cannot be requeued without its original input.
+            with pytest.raises(IntegrityError):
+                with Session() as db:
+                    with db.begin():
+                        review = db.get(WorkTaskRecord, provider_task_id)
+                        review.status = TaskStatus.QUEUED.value
+                        db.flush()
+            with Session() as db:
+                review = db.get(WorkTaskRecord, provider_task_id)
+                assert review.status == TaskStatus.WAITING_REVIEW.value
+                assert review.payload_purged_at is not None
+
             with Session() as db:
                 events = db.query(WorkActivityEventRecord).filter(WorkActivityEventRecord.task_id.in_(task_ids)).all()
                 assert any(item.event_type == ActivityEventType.TASK_WAITING_REVIEW.value for item in events)

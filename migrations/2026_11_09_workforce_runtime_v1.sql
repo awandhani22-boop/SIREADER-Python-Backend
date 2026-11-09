@@ -105,7 +105,7 @@ BEGIN
     ) THEN
         ALTER TABLE public.workforce_tasks
             ADD CONSTRAINT ck_workforce_task_payload_purged_empty
-            CHECK (payload_purged_at IS NULL OR (input_payload = '{}'::jsonb AND result_payload IS NULL));
+            CHECK (payload_purged_at IS NULL OR (input_payload = '{}'::jsonb AND result_payload IS NULL AND status IN ('WAITING_REVIEW', 'COMPLETED', 'FAILED', 'CANCELLED', 'DEAD_LETTERED')));
     END IF;
 END;
 $payload_retention_constraint$;
