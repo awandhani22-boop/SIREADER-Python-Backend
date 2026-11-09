@@ -218,8 +218,8 @@ def test_telemetry_budget_observability_preserves_currency_and_links_workforce_c
     client, sessions = api_client
     from app.config import settings
 
-    today = date.today()
-    month_start = today - timedelta(days=int(settings.AI_BUDGET_PERIOD_DAYS) - 1)
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo("Asia/Jakarta")).date()
     common = {
         "usage_date": today,
         "provider": "tokenmurah",

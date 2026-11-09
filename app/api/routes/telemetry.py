@@ -144,7 +144,7 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
             daily_totals["reserved"] += amount(row, "IDR", "reserved")
         elif row["billing_currency"] not in {"USD", "IDR"}:
             _checked_currency(row["billing_currency"])
-        daily_status[str(row["status"])] = daily_status.get(str(row["status"]), 0) + int(row["requests"])
+            daily_status[str(row["status"])] = daily_status.get(str(row["status"]), 0) + int(row["requests"])
 
     month_totals: dict[str, dict[str, Any]] = {
         currency: {"actual": Decimal("0"), "reserved": Decimal("0"), "statuses": {}, "tiers": {}}
@@ -249,7 +249,7 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
             cost_view.c.task_id, cost_view.c.worker_id, cost_view.c.tier,
             cost_view.c.model, cost_view.c.billing_currency,
         )
-        .order_by(func.sum(cost_view.c.cost_rp + cost_view.c.reserved_rp + cost_view.c.cost_usd + cost_view.c.reserved_usd).desc())
+        .order_by(func.count().desc(), cost_view.c.task_id.asc())
         .limit(25)
     ).mappings().all()
     recent_task_costs = []
