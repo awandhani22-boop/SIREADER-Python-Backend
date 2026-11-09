@@ -88,7 +88,11 @@ It registers `SIREADER-WorkforceMaintenance` every 5 minutes using the current i
 .\scripts\register_workforce_maintenance.ps1 -Remove
 ```
 
-The registration script requires the backend `.env` file and a configured local database connection. Verify the task's last result and application logs after registration. It does not enable the workforce worker runtime or any provider.
+The registration script only verifies that the backend `.env` file exists; it does **not** inspect or validate the database target. The maintenance cycle expires stale reviews and can purge expired task/review payloads, so it is a data-mutating operation.
+
+**Database safety gate — mandatory:** before registering or running the task, inspect the `DATABASE_URL` target privately (never paste or print credentials). Confirm it points to an isolated local/development PostgreSQL database and is **not** Supabase LIVE or any production/remote database. The current `app/database/connection.py` documents a Supabase Shared Pooler connection, so do not assume that the existing `.env` is local or safe. If the target cannot be positively verified as non-LIVE, do not register the scheduler and do not run the one-shot maintenance command. No Supabase LIVE maintenance is authorized by this runbook.
+
+After the database target has been independently verified as non-LIVE and the owner authorizes local scheduling, verify the task's last result and application logs after registration. Registration does not enable the workforce worker runtime or any provider.
 
 **Important:** these scripts are committed but cannot register a task on the owner's Windows machine from GitHub CI. The deployment owner must run the registration command locally.
 
