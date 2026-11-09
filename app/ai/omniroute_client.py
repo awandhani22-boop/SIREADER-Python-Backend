@@ -188,6 +188,9 @@ def call_ai(
     max_output_tokens=None,
     extra_input_tokens=0,
     analysis_log_id=None,
+    request_id=None,
+    max_cost_rp=None,
+    max_cost_usd=None,
 ):
     """
     Memanggil satu model OmniRoute.
@@ -282,7 +285,10 @@ def call_ai(
         prompt_text=prompt_text,
         max_output_tokens=output_limit,
         extra_input_tokens=extra_input_tokens,
+        request_id=request_id,
         analysis_log_id=analysis_log_id,
+        max_cost_rp=max_cost_rp,
+        max_cost_usd=max_cost_usd,
     )
 
     request_id = reservation["request_id"]
