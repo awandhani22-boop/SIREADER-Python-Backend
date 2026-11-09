@@ -117,11 +117,18 @@ SELECT
         WHERE status = 'COMPLETED' AND completed_at >= now() - interval '24 hours'
     ) AS completed_last_24h;
 
+-- PostgreSQL requires the new owner to hold CREATE on the containing schema
+-- when ownership is transferred. Grant it only for this migration operation.
+GRANT CREATE ON SCHEMA public TO sireader_view_owner;
+
 ALTER VIEW public.v_api_workforce_workers OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_workforce_tasks OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_workforce_attempts OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_workforce_activity OWNER TO sireader_view_owner;
 ALTER VIEW public.v_api_workforce_runtime OWNER TO sireader_view_owner;
+
+-- The runtime view owner must never retain schema CREATE privilege.
+REVOKE CREATE ON SCHEMA public FROM sireader_view_owner;
 
 REVOKE ALL ON public.v_api_workforce_workers,
               public.v_api_workforce_tasks,
