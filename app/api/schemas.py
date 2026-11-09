@@ -156,6 +156,7 @@ class WorkforceWorkerDTO(BaseModel):
     enabled: bool
     max_concurrency: int = Field(ge=1, le=32)
     model_tier: Literal["NONE", "FAST", "REASONING", "ESCALATION"]
+    capability_ids: List[str] = Field(default_factory=list, max_length=28)
     process_status: WorkforceProcessStatus
     heartbeat_at: datetime | None = None
     active_task_count: int = Field(ge=0)
