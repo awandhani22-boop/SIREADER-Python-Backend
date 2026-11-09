@@ -1197,3 +1197,84 @@ def test_workforce_policy_mock_mode_never_routes_provider_tier_to_excluded_worke
     )
     assert result.action is SensitiveTaskAction.ALLOW
     assert result.model_tier == "NONE"
+
+
+def test_sensitive_task_policy_forces_atomic_human_output_review(db_session: Session):
+    now = datetime.now(timezone.utc)
+    worker_id = "data_archivist"
+    heartbeat_worker(
+        db_session,
+        heartbeat=WorkerHeartbeatContract(
+            worker_id=worker_id,
+            instance_id="inst_sensitive_review_01",
+            process_state=WorkerProcessState.READY,
+            process_started_at=now,
+            heartbeat_at=now,
+            observed_at=now,
+            active_task_count=0,
+            in_flight_provider_requests=0,
+            schema_version=1,
+        ),
+    )
+    db_session.commit()
+    task, _ = enqueue_task(
+        db_session,
+        idempotency_key=f"idem_{uuid4().hex[:10]}",
+        correlation_id=f"corr_{uuid4().hex[:10]}",
+        task_type="DATA_ARCHIVING",
+        title="Sensitive reviewed archive",
+        required_capability="data_archiving",
+        input_payload={"archive_id": "arch_sensitive"},
+        priority=40,
+        now=now,
+    )
+    db_session.commit()
+    claimed = claim_next_task(
+        db_session, worker_id=worker_id, instance_id="inst_sensitive_review_01",
+        now=now + timedelta(seconds=1),
+    )
+    assert claimed is not None
+    claimed_task, attempt = claimed
+    start_task(db_session, task_id=claimed_task.task_id, lease_token=attempt.lease_token, now=now)
+    completed = complete_task(
+        db_session,
+        task_id=claimed_task.task_id,
+        lease_token=attempt.lease_token,
+        result_payload={"summary": "Redacted personal-data review result"},
+        force_human_review=True,
+        review_trigger_reason="SENSITIVE_TASK_REVIEW",
+        policy_context={
+            "policy_version": POLICY_VERSION,
+            "sensitive_action": "REVIEW",
+            "model_tier": "NONE",
+            "reason_code": "SENSITIVE_PERSONAL_DATA_REVIEW",
+            "redacted_fields": 1,
+        },
+        now=now,
+    )
+    db_session.commit()
+    assert completed.status == TaskStatus.COMPLETED.value
+    assert completed.result_payload is None
+    review = db_session.scalar(
+        select(WorkforceTaskReviewRecord).where(
+            WorkforceTaskReviewRecord.task_id == completed.task_id,
+        )
+    )
+    assert review is not None and review.status == ReviewStatus.PENDING.value
+    queued = db_session.scalar(
+        select(WorkActivityEventRecord).where(
+            WorkActivityEventRecord.task_id == completed.task_id,
+            WorkActivityEventRecord.event_type == ActivityEventType.HUMAN_REVIEW_QUEUED.value,
+        )
+    )
+    assert queued is not None
+    assert queued.payload["trigger_reason"] == "SENSITIVE_TASK_REVIEW"
+    complete_event = db_session.scalar(
+        select(WorkActivityEventRecord).where(
+            WorkActivityEventRecord.task_id == completed.task_id,
+            WorkActivityEventRecord.event_type == ActivityEventType.TASK_COMPLETED.value,
+        )
+    )
+    assert complete_event is not None
+    assert complete_event.payload["sensitive_action"] == "REVIEW"
+    assert complete_event.payload["policy_version"] == POLICY_VERSION
