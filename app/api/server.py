@@ -24,6 +24,7 @@ from app.api.routes import (
     system_router,
     telemetry_router,
     events_router,
+    workforce_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,11 @@ APPROVED_VIEW_NAMES = (
     "v_api_queued_pending_messages",
     "v_api_active_market_watches",
     "v_api_audit_decisions",
+    "v_api_workforce_workers",
+    "v_api_workforce_tasks",
+    "v_api_workforce_attempts",
+    "v_api_workforce_activity",
+    "v_api_workforce_runtime",
 )
 
 PRIVILEGE_AUDIT_SQL = """
@@ -46,7 +52,14 @@ base_tables(table_name) AS (
         ('ai_analysis_logs'),
         ('ai_pending_messages'),
         ('trade_decision_watches'),
-        ('approval_decisions')
+        ('approval_decisions'),
+        ('workforce_workers'),
+        ('workforce_capabilities'),
+        ('workforce_worker_capabilities'),
+        ('workforce_heartbeats'),
+        ('workforce_tasks'),
+        ('workforce_task_attempts'),
+        ('workforce_activity_events')
 ),
 table_privileges(privilege_name) AS (
     VALUES
@@ -63,7 +76,12 @@ view_names(view_name) AS (
         ('v_api_active_in_flight_tasks'),
         ('v_api_queued_pending_messages'),
         ('v_api_active_market_watches'),
-        ('v_api_audit_decisions')
+        ('v_api_audit_decisions'),
+        ('v_api_workforce_workers'),
+        ('v_api_workforce_tasks'),
+        ('v_api_workforce_attempts'),
+        ('v_api_workforce_activity'),
+        ('v_api_workforce_runtime')
 ),
 protected_objects(object_name) AS (
     SELECT table_name FROM base_tables
@@ -138,7 +156,59 @@ view_owner_columns(table_name, column_name) AS (
         ('approval_decisions', 'decision'),
         ('approval_decisions', 'previous_status'),
         ('approval_decisions', 'new_status'),
-        ('approval_decisions', 'created_at')
+        ('approval_decisions', 'created_at'),
+        ('workforce_workers', 'worker_id'),
+        ('workforce_workers', 'display_name'),
+        ('workforce_workers', 'role'),
+        ('workforce_workers', 'department'),
+        ('workforce_workers', 'enabled'),
+        ('workforce_workers', 'max_concurrency'),
+        ('workforce_workers', 'model_tier'),
+        ('workforce_workers', 'schema_version'),
+        ('workforce_workers', 'created_at'),
+        ('workforce_workers', 'updated_at'),
+        ('workforce_heartbeats', 'worker_id'),
+        ('workforce_heartbeats', 'process_state'),
+        ('workforce_heartbeats', 'heartbeat_at'),
+        ('workforce_heartbeats', 'active_task_count'),
+        ('workforce_heartbeats', 'in_flight_provider_requests'),
+        ('workforce_tasks', 'task_id'),
+        ('workforce_tasks', 'correlation_id'),
+        ('workforce_tasks', 'schema_version'),
+        ('workforce_tasks', 'task_type'),
+        ('workforce_tasks', 'title'),
+        ('workforce_tasks', 'required_capability'),
+        ('workforce_tasks', 'requested_worker_id'),
+        ('workforce_tasks', 'assigned_worker_id'),
+        ('workforce_tasks', 'priority'),
+        ('workforce_tasks', 'status'),
+        ('workforce_tasks', 'attempts'),
+        ('workforce_tasks', 'max_attempts'),
+        ('workforce_tasks', 'not_before'),
+        ('workforce_tasks', 'deadline_at'),
+        ('workforce_tasks', 'lease_expires_at'),
+        ('workforce_tasks', 'failure_code'),
+        ('workforce_tasks', 'created_at'),
+        ('workforce_tasks', 'updated_at'),
+        ('workforce_tasks', 'completed_at'),
+        ('workforce_task_attempts', 'attempt_id'),
+        ('workforce_task_attempts', 'task_id'),
+        ('workforce_task_attempts', 'attempt_number'),
+        ('workforce_task_attempts', 'worker_id'),
+        ('workforce_task_attempts', 'status'),
+        ('workforce_task_attempts', 'billing_currency'),
+        ('workforce_task_attempts', 'cost_amount'),
+        ('workforce_task_attempts', 'error_code'),
+        ('workforce_task_attempts', 'started_at'),
+        ('workforce_task_attempts', 'finished_at'),
+        ('workforce_task_attempts', 'created_at'),
+        ('workforce_activity_events', 'event_id'),
+        ('workforce_activity_events', 'event_type'),
+        ('workforce_activity_events', 'occurred_at'),
+        ('workforce_activity_events', 'worker_id'),
+        ('workforce_activity_events', 'task_id'),
+        ('workforce_activity_events', 'attempt_id'),
+        ('workforce_activity_events', 'correlation_id')
 ),
 view_rows AS (
     SELECT
@@ -418,8 +488,8 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
         raise RuntimeError("sireader_view_owner has privileges on unapproved base-table columns.")
     if snapshot.get("owner_column_allowlist_ok") is not True:
         raise RuntimeError("sireader_view_owner lacks one or more approved base-table column grants.")
-    if snapshot.get("approved_view_count") != 6:
-        raise RuntimeError("All six approved API views must exist before the API can start.")
+    if snapshot.get("approved_view_count") != 11:
+        raise RuntimeError("All eleven approved API views must exist before the API can start.")
     if snapshot.get("approved_view_owners_ok") is not True:
         raise RuntimeError("All approved API views must be owned by sireader_view_owner.")
     if snapshot.get("approved_view_select_ok") is not True:
@@ -530,6 +600,7 @@ def create_app(*, manage_database_lifecycle: bool = True) -> FastAPI:
         market_watches_router,
         audit_router,
         events_router,
+        workforce_router,
     ):
         app.include_router(route, dependencies=[Depends(verify_bearer_token)])
     return app
