@@ -53,6 +53,28 @@ def _load_worker_contract(db, worker_id: str) -> WorkerContract:
     )
 
 
+def _heartbeat_contract(
+    worker_id: str,
+    instance_id: str,
+    process_started_at: datetime,
+    process_state: WorkerProcessState,
+    *,
+    now: datetime,
+    active_task_count: int = 0,
+    in_flight_provider_requests: int = 0,
+) -> WorkerHeartbeatContract:
+    return WorkerHeartbeatContract(
+        worker_id=worker_id,
+        instance_id=instance_id,
+        process_state=process_state,
+        process_started_at=process_started_at,
+        heartbeat_at=now,
+        active_task_count=active_task_count,
+        in_flight_provider_requests=in_flight_provider_requests,
+        observed_at=now,
+    )
+
+
 def _record_heartbeat(
     worker_id: str,
     instance_id: str,
@@ -63,15 +85,11 @@ def _record_heartbeat(
     in_flight_provider_requests: int = 0,
 ) -> None:
     now = _utc_now()
-    contract = WorkerHeartbeatContract(
-        worker_id=worker_id,
-        instance_id=instance_id,
-        process_state=process_state,
-        process_started_at=process_started_at,
-        heartbeat_at=now,
+    contract = _heartbeat_contract(
+        worker_id, instance_id, process_started_at, process_state,
+        now=now,
         active_task_count=active_task_count,
         in_flight_provider_requests=in_flight_provider_requests,
-        observed_at=now,
     )
     with SessionLocal() as db:
         with db.begin():
@@ -110,15 +128,14 @@ class _LeaseKeeper:
                 now = _utc_now()
                 with SessionLocal() as db:
                     with db.begin():
-                        heartbeat_worker(db, WorkerHeartbeatContract(
-                            worker_id=self.worker_id,
-                            instance_id=self.instance_id,
-                            process_state=WorkerProcessState.READY,
-                            process_started_at=self.process_started_at,
-                            heartbeat_at=now,
+                        heartbeat_worker(db, _heartbeat_contract(
+                            self.worker_id,
+                            self.instance_id,
+                            self.process_started_at,
+                            WorkerProcessState.READY,
+                            now=now,
                             active_task_count=1,
                             in_flight_provider_requests=1 if self._provider_started.is_set() else 0,
-                            observed_at=now,
                         ))
                         renew_task_lease(
                             db, task_id=self.task_id, lease_token=self.lease_token,
@@ -191,9 +208,18 @@ def run_worker_once(
         )
         return True
 
+    task_started_at = _utc_now()
     with SessionLocal() as db:
         with db.begin():
-            start_task(db, task_id=task_id, lease_token=lease_token)
+            start_task(db, task_id=task_id, lease_token=lease_token, now=task_started_at)
+            heartbeat_worker(db, _heartbeat_contract(
+                worker_id,
+                instance_id,
+                process_started_at,
+                WorkerProcessState.READY,
+                now=task_started_at,
+                active_task_count=1,
+            ))
 
     lease_seconds = max(
         MIN_LEASE_SECONDS,
@@ -211,12 +237,22 @@ def run_worker_once(
         return True
 
     def persist_provider_reservation(_provider_request_id: str) -> None:
+        reserved_at = _utc_now()
         with SessionLocal() as db:
             with db.begin():
                 mark_provider_requested(
                     db, task_id=task_id, lease_token=lease_token,
-                    provider_request_id=_provider_request_id, now=_utc_now(),
+                    provider_request_id=_provider_request_id, now=reserved_at,
                 )
+                heartbeat_worker(db, _heartbeat_contract(
+                    worker_id,
+                    instance_id,
+                    process_started_at,
+                    WorkerProcessState.READY,
+                    now=reserved_at,
+                    active_task_count=1,
+                    in_flight_provider_requests=1,
+                ))
 
     request = WorkerExecutionRequest(
         task_id=task_id,
