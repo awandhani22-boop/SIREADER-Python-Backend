@@ -223,8 +223,8 @@ def test_idle_event_stream_emits_heartbeat_comment_and_unsubscribes(monkeypatch)
         subscriber = hub.subscribe()
         generator = generate_event_stream(DisconnectAfterHeartbeat(), hub, subscriber)
 
-        assert await generator.__anext__() == "retry: 3000\\n\\n"
-        assert await generator.__anext__() == ": ping\\n\\n"
+        assert await generator.__anext__() == "retry: 3000\n\n"
+        assert await generator.__anext__() == ": ping\n\n"
 
         with pytest.raises(StopAsyncIteration):
             await generator.__anext__()
