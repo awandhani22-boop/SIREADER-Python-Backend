@@ -155,7 +155,7 @@ def enqueue_task(db: Session, *, task_type: str, title: str, required_capability
                  input_payload: dict, idempotency_key: str, priority: int = 50,
                  correlation_id: str | None = None, requested_worker_id: str | None = None,
                  max_attempts: int = 3, not_before: datetime | None = None,
-                 deadline_at: datetime | None = None) -> tuple[WorkTaskRecord, bool]:
+                 deadline_at: datetime | None = None, now: datetime | None = None) -> tuple[WorkTaskRecord, bool]:
     """Create one generic task; a repeated idempotency key returns the original row."""
     if not isinstance(idempotency_key, str) or len(idempotency_key) < 8 or len(idempotency_key) > 128:
         raise ValueError("idempotency_key must contain 8..128 characters")
@@ -170,7 +170,7 @@ def enqueue_task(db: Session, *, task_type: str, title: str, required_capability
     if not 1 <= int(priority) <= 100 or not 1 <= int(max_attempts) <= 10:
         raise ValueError("priority or max_attempts is outside the allowed range")
     payload = _validate_payload(input_payload)
-    now = datetime.now(timezone.utc)
+    now = _now(now)
     correlation_id = correlation_id or uuid4().hex
     existing = db.scalar(select(WorkTaskRecord).where(WorkTaskRecord.idempotency_key == idempotency_key))
     if existing is not None:
