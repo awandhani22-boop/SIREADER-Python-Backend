@@ -77,3 +77,86 @@ v_api_audit_decisions = Table(
     Column("reviewer_role", String(50), nullable=False),
     Column("decided_at", DateTime(timezone=True), nullable=False),
 )
+
+
+# Phase 4.4 — worker runtime views (strict metadata allowlist; no task input/result payloads).
+v_api_workforce_workers = Table(
+    "v_api_workforce_workers", metadata,
+    Column("worker_id", String(64), primary_key=True),
+    Column("display_name", String(100), nullable=False),
+    Column("role", String(160), nullable=False),
+    Column("department", String(80), nullable=False),
+    Column("enabled", Boolean, nullable=False),
+    Column("max_concurrency", Integer, nullable=False),
+    Column("model_tier", String(20), nullable=False),
+    Column("process_status", String(20), nullable=False),
+    Column("heartbeat_at", DateTime(timezone=True), nullable=True),
+    Column("active_task_count", Integer, nullable=False),
+    Column("in_flight_provider_requests", Integer, nullable=False),
+    Column("schema_version", Integer, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+v_api_workforce_tasks = Table(
+    "v_api_workforce_tasks", metadata,
+    Column("task_id", String(64), primary_key=True),
+    Column("correlation_id", String(64), nullable=False),
+    Column("schema_version", Integer, nullable=False),
+    Column("task_type", String(64), nullable=False),
+    Column("title", String(180), nullable=False),
+    Column("required_capability", String(64), nullable=False),
+    Column("requested_worker_id", String(64), nullable=True),
+    Column("assigned_worker_id", String(64), nullable=True),
+    Column("priority", Integer, nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("attempts", Integer, nullable=False),
+    Column("max_attempts", Integer, nullable=False),
+    Column("not_before", DateTime(timezone=True), nullable=False),
+    Column("deadline_at", DateTime(timezone=True), nullable=True),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("failure_code", String(80), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+)
+
+v_api_workforce_attempts = Table(
+    "v_api_workforce_attempts", metadata,
+    Column("attempt_id", String(64), primary_key=True),
+    Column("task_id", String(64), nullable=False),
+    Column("attempt_number", Integer, nullable=False),
+    Column("worker_id", String(64), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("billing_currency", String(3), nullable=True),
+    Column("cost_amount", Numeric(18, 6), nullable=True),
+    Column("error_code", String(80), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+v_api_workforce_activity = Table(
+    "v_api_workforce_activity", metadata,
+    Column("event_id", String(64), primary_key=True),
+    Column("event_type", String(40), nullable=False),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("worker_id", String(64), nullable=True),
+    Column("task_id", String(64), nullable=True),
+    Column("attempt_id", String(64), nullable=True),
+    Column("correlation_id", String(64), nullable=False),
+)
+
+v_api_workforce_runtime = Table(
+    "v_api_workforce_runtime", metadata,
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("configured_workers", Integer, nullable=False),
+    Column("ready_workers", Integer, nullable=False),
+    Column("stale_workers", Integer, nullable=False),
+    Column("offline_workers", Integer, nullable=False),
+    Column("active_tasks", Integer, nullable=False),
+    Column("queued_tasks", Integer, nullable=False),
+    Column("waiting_review_tasks", Integer, nullable=False),
+    Column("dead_lettered_tasks", Integer, nullable=False),
+    Column("completed_last_24h", Integer, nullable=False),
+)
