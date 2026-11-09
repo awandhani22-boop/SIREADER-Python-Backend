@@ -47,6 +47,14 @@ def test_event_envelope_contains_only_allowlisted_resource_metadata():
     assert "row" not in message.encode().lower()
 
 
+
+def test_workforce_resource_is_allowlisted_and_keeps_canonical_order():
+    hub = EventHub()
+    message = hub.publish_resources(["workforce", "audit", "workforce"])
+    assert message is not None
+    assert message.data["resources"] == ["audit", "workforce"]
+
+
 def test_unknown_resource_is_ignored_without_publishing():
     hub = EventHub()
     assert hub.publish_resources(["message_text", "symbol_price"]) is None
