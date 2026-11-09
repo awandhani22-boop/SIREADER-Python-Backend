@@ -164,6 +164,7 @@ class WorkforceWorkerDTO(BaseModel):
     schema_version: Literal[1] = 1
     created_at: datetime
     updated_at: datetime
+    accepting_tasks: bool
 
 
 class WorkforceRuntimeDTO(BaseModel):

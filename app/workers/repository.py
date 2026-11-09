@@ -248,6 +248,8 @@ def claim_next_task(db: Session, *, worker_id: str, instance_id: str,
     worker = db.scalar(select(WorkerDefinitionRecord).where(WorkerDefinitionRecord.worker_id == worker_id).with_for_update())
     if worker is None or not worker.enabled:
         raise WorkerUnavailableError("worker is not registered or is disabled")
+    if not worker.accepting_tasks:
+        return None
     _require_fresh_worker_heartbeat(db, worker_id, instance_id, stamp, heartbeat_timeout_seconds)
     links = db.execute(
         select(WorkerCapabilityAssignmentRecord.capability_id).where(
@@ -470,6 +472,49 @@ def cancel_task(db: Session, *, task_id: str, now: datetime | None = None) -> Wo
     _append_event(db, event_type=event_type, correlation_id=task.correlation_id, worker_id=task.assigned_worker_id, task_id=task.task_id, attempt_id=active_attempt.attempt_id if active_attempt else None, payload={"cancelled": True, "provider_outcome_unknown": provider_was_requested}, occurred_at=stamp)
     db.flush()
     return task
+
+
+
+
+def set_worker_accepting_tasks(
+    db: Session,
+    *,
+    worker_id: str,
+    accepting_tasks: bool,
+    now: datetime | None = None,
+) -> WorkerDefinitionRecord:
+    """Pause/resume scheduling without disabling the worker or touching its leases."""
+    if not isinstance(accepting_tasks, bool):
+        raise ValueError("accepting_tasks must be a boolean")
+    worker = db.scalar(
+        select(WorkerDefinitionRecord)
+        .where(WorkerDefinitionRecord.worker_id == worker_id)
+        .with_for_update()
+    )
+    if worker is None:
+        raise WorkforceRepositoryError("worker not found")
+    if not worker.enabled:
+        raise WorkerUnavailableError("worker is disabled")
+    stamp = _now(now)
+    previous = bool(worker.accepting_tasks)
+    if previous != accepting_tasks:
+        worker.accepting_tasks = accepting_tasks
+        worker.updated_at = stamp
+        correlation_id = uuid4().hex
+        _append_event(
+            db,
+            event_type=ActivityEventType.WORKER_STATE_CHANGED,
+            correlation_id=correlation_id,
+            worker_id=worker_id,
+            payload={
+                "field": "accepting_tasks",
+                "previous": previous,
+                "current": accepting_tasks,
+            },
+            occurred_at=stamp,
+        )
+        db.flush()
+    return worker
 
 
 def recover_expired_leases(db: Session, *, now: datetime | None = None, base_backoff_seconds: int = 30) -> dict[str, int]:

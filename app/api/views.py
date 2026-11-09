@@ -97,6 +97,7 @@ v_api_workforce_workers = Table(
     Column("schema_version", Integer, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("accepting_tasks", Boolean, nullable=False),
 )
 
 v_api_workforce_tasks = Table(

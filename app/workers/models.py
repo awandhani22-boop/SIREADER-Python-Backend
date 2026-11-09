@@ -22,6 +22,7 @@ class WorkerDefinitionRecord(Base):
     role: Mapped[str] = mapped_column(String(160), nullable=False)
     department: Mapped[str] = mapped_column(String(80), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    accepting_tasks: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     max_concurrency: Mapped[int] = mapped_column(Integer, nullable=False)
     model_tier: Mapped[str] = mapped_column(String(20), nullable=False, default="NONE")
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -145,3 +146,33 @@ class WorkActivityEventRecord(Base):
     attempt_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     correlation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+
+class WorkforceCommandAuditRecord(Base):
+    """Append-only evidence for authenticated, idempotent operator commands."""
+
+    __tablename__ = "workforce_command_audit"
+    __table_args__ = (
+        UniqueConstraint("actor_id", "idempotency_key", name="uq_workforce_command_actor_idempotency"),
+        CheckConstraint(
+            "command_type IN ('TASK_ENQUEUE','TASK_CANCEL','TASK_RETRY','WORKER_SCHEDULING_SET')",
+            name="ck_workforce_command_type",
+        ),
+        CheckConstraint("length(request_fingerprint) = 64", name="ck_workforce_command_fingerprint"),
+        CheckConstraint("jsonb_typeof(outcome) = 'object'", name="ck_workforce_command_outcome"),
+        Index("ix_workforce_command_audit_created", "created_at"),
+        Index("ix_workforce_command_audit_correlation", "correlation_id"),
+    )
+
+    command_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    command_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    outcome: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
