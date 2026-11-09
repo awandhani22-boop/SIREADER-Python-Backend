@@ -725,10 +725,8 @@ def test_db_retention_purge_guard_before_task_expiry_rejected(db_session: Sessio
         review_id=review_id,
         task_id=task_id,
         attempt_id=attempt_id,
-        status=ReviewStatus.APPROVED.value,
+        status=ReviewStatus.PENDING.value,
         original_output_sha256="a" * 64,
-        adjudicated_by="operator_dan",
-        adjudicated_at=now,
         review_expires_at=now + timedelta(hours=24),
     )
     db_session.add(rev)
@@ -739,6 +737,15 @@ def test_db_retention_purge_guard_before_task_expiry_rejected(db_session: Sessio
         original_output={"report": "classified"},
     )
     db_session.add(payload)
+    db_session.commit()
+    db_session.execute(
+        text(
+            "UPDATE public.workforce_task_reviews "
+            "SET status = 'APPROVED', adjudicated_by = 'operator_dan', adjudicated_at = now() "
+            "WHERE review_id = :rid"
+        ),
+        {"rid": review_id},
+    )
     db_session.commit()
 
     with pytest.raises(Exception, match="before parent task expiration"):
@@ -849,10 +856,8 @@ def test_db_retention_purge_and_anti_resurrection(db_session: Session):
         review_id=review_id,
         task_id=task_id,
         attempt_id=attempt_id,
-        status=ReviewStatus.APPROVED.value,
+        status=ReviewStatus.PENDING.value,
         original_output_sha256="c" * 64,
-        adjudicated_by="operator_dan",
-        adjudicated_at=now - timedelta(days=2),
         review_expires_at=now + timedelta(hours=24),
     )
     db_session.add(rev)
@@ -863,6 +868,15 @@ def test_db_retention_purge_and_anti_resurrection(db_session: Session):
         original_output={"data": "to_be_purged"},
     )
     db_session.add(payload)
+    db_session.commit()
+    db_session.execute(
+        text(
+            "UPDATE public.workforce_task_reviews "
+            "SET status = 'APPROVED', adjudicated_by = 'operator_dan', adjudicated_at = now() "
+            "WHERE review_id = :rid"
+        ),
+        {"rid": review_id},
+    )
     db_session.commit()
 
     # 1. Purge succeeds for terminal review after task expiry
