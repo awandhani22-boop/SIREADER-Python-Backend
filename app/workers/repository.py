@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.workers.retention_settings import retention_settings
 from app.workers.models import (
-    WorkActivityEventRecord, WorkTaskAttemptRecord, WorkTaskRecord,
+    ActorType, WorkActivityEventRecord, WorkTaskAttemptRecord, WorkTaskRecord,
     WorkerCapabilityAssignmentRecord, WorkerCapabilityRecord,
     WorkerDefinitionRecord, WorkerHeartbeatRecord,
 )
@@ -76,10 +76,16 @@ def _validate_payload(payload: dict | None) -> dict:
 def _append_event(db: Session, *, event_type: ActivityEventType, correlation_id: str,
                   worker_id: str | None = None, task_id: str | None = None,
                   attempt_id: str | None = None, payload: dict | None = None,
-                  occurred_at: datetime | None = None) -> WorkActivityEventRecord:
+                  occurred_at: datetime | None = None,
+                  actor_type: ActorType | str = ActorType.SYSTEM,
+                  actor_id: str | None = None,
+                  related_task_id: str | None = None) -> WorkActivityEventRecord:
+    actor_type_val = actor_type.value if isinstance(actor_type, ActorType) else str(actor_type)
     event = WorkActivityEventRecord(
         event_id=uuid4().hex, event_type=event_type.value, occurred_at=_now(occurred_at),
+        actor_type=actor_type_val, actor_id=actor_id,
         worker_id=worker_id, task_id=task_id, attempt_id=attempt_id,
+        related_task_id=related_task_id,
         correlation_id=correlation_id, payload=_validate_payload(payload),
     )
     db.add(event)
@@ -171,7 +177,10 @@ def enqueue_task(db: Session, *, task_type: str, title: str, required_capability
                  input_payload: dict, idempotency_key: str, priority: int = 50,
                  correlation_id: str | None = None, requested_worker_id: str | None = None,
                  max_attempts: int = 3, not_before: datetime | None = None,
-                 deadline_at: datetime | None = None, now: datetime | None = None) -> tuple[WorkTaskRecord, bool]:
+                 deadline_at: datetime | None = None, now: datetime | None = None,
+                 actor_type: ActorType | str = ActorType.OPERATOR,
+                 actor_id: str | None = None,
+                 related_task_id: str | None = None) -> tuple[WorkTaskRecord, bool]:
     """Create one generic task; a repeated idempotency key returns the original row."""
     if not isinstance(idempotency_key, str) or len(idempotency_key) < 8 or len(idempotency_key) > 128:
         raise ValueError("idempotency_key must contain 8..128 characters")
@@ -206,6 +215,7 @@ def enqueue_task(db: Session, *, task_type: str, title: str, required_capability
         attempts=0, max_attempts=int(max_attempts), not_before=_now(not_before or now),
         deadline_at=_now(deadline_at) if deadline_at else None,
         created_at=now, updated_at=now,
+        related_task_id=related_task_id,
     )
     try:
         with db.begin_nested():
@@ -216,10 +226,14 @@ def enqueue_task(db: Session, *, task_type: str, title: str, required_capability
         if existing is None:
             raise
         return existing, False
+    enq_payload = {"task_type": task_type, "required_capability": required_capability, "priority": priority}
+    if related_task_id:
+        enq_payload["retry_of_task_id"] = related_task_id
     _append_event(
         db, event_type=ActivityEventType.TASK_ENQUEUED, correlation_id=correlation_id,
-        task_id=row.task_id, payload={"task_type": task_type, "required_capability": required_capability, "priority": priority},
-        occurred_at=now,
+        task_id=row.task_id, payload=enq_payload,
+        occurred_at=now, actor_type=actor_type, actor_id=actor_id,
+        related_task_id=related_task_id,
     )
     db.flush()
     return row, True
@@ -307,6 +321,7 @@ def claim_next_task(db: Session, *, worker_id: str, instance_id: str,
         db, event_type=ActivityEventType.TASK_CLAIMED, correlation_id=task.correlation_id,
         worker_id=worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id,
         payload={"attempt_number": attempt.attempt_number}, occurred_at=stamp,
+        actor_type=ActorType.WORKER, actor_id=worker_id,
     )
     db.flush()
     return task, attempt
@@ -332,7 +347,7 @@ def start_task(db: Session, *, task_id: str, lease_token: str, now: datetime | N
     task.updated_at = stamp
     attempt.status = AttemptStatus.STARTED.value
     attempt.started_at = stamp
-    _append_event(db, event_type=ActivityEventType.TASK_STARTED, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, occurred_at=stamp)
+    _append_event(db, event_type=ActivityEventType.TASK_STARTED, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, occurred_at=stamp, actor_type=ActorType.WORKER, actor_id=attempt.worker_id)
     db.flush()
     return task
 
@@ -348,7 +363,7 @@ def mark_provider_requested(db: Session, *, task_id: str, lease_token: str, prov
     attempt.status = AttemptStatus.PROVIDER_REQUESTED.value
     attempt.provider_request_id = stable_provider_request_id
     attempt.provider_started_at = stamp
-    _append_event(db, event_type=ActivityEventType.PROVIDER_REQUESTED, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, payload={"provider_request_id": stable_provider_request_id}, occurred_at=stamp)
+    _append_event(db, event_type=ActivityEventType.PROVIDER_REQUESTED, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, payload={"provider_request_id": stable_provider_request_id}, occurred_at=stamp, actor_type=ActorType.WORKER, actor_id=attempt.worker_id)
     db.flush()
     return attempt
 
@@ -391,7 +406,7 @@ def complete_task(db: Session, *, task_id: str, lease_token: str, result_payload
         if amount < 0:
             raise ValueError("cost_amount cannot be negative")
         attempt.cost_amount = amount
-    _append_event(db, event_type=ActivityEventType.TASK_COMPLETED, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, payload={"source": payload.get("source", "LIVE")}, occurred_at=stamp)
+    _append_event(db, event_type=ActivityEventType.TASK_COMPLETED, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, payload={"source": payload.get("source", "LIVE")}, occurred_at=stamp, actor_type=ActorType.WORKER, actor_id=attempt.worker_id)
     db.flush()
     return task
 
@@ -433,12 +448,14 @@ def fail_task(db: Session, *, task_id: str, lease_token: str, error_code: str,
     task.lease_token = None
     task.lease_owner = None
     task.lease_expires_at = None
-    _append_event(db, event_type=event, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, payload={"error_code": safe_code, "retryable": retryable, "outcome_unknown": outcome_unknown or provider_was_requested}, occurred_at=stamp)
+    _append_event(db, event_type=event, correlation_id=task.correlation_id, worker_id=attempt.worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id, payload={"error_code": safe_code, "retryable": retryable, "outcome_unknown": outcome_unknown or provider_was_requested}, occurred_at=stamp, actor_type=ActorType.WORKER, actor_id=attempt.worker_id)
     db.flush()
     return task
 
 
-def cancel_task(db: Session, *, task_id: str, now: datetime | None = None) -> WorkTaskRecord:
+def cancel_task(db: Session, *, task_id: str, now: datetime | None = None,
+                actor_type: ActorType | str = ActorType.OPERATOR,
+                actor_id: str | None = "local_operator") -> WorkTaskRecord:
     task = db.scalar(select(WorkTaskRecord).where(WorkTaskRecord.task_id == task_id).with_for_update())
     if task is None:
         raise WorkforceRepositoryError("task not found")
@@ -469,7 +486,7 @@ def cancel_task(db: Session, *, task_id: str, now: datetime | None = None) -> Wo
     task.lease_token = None
     task.lease_owner = None
     task.lease_expires_at = None
-    _append_event(db, event_type=event_type, correlation_id=task.correlation_id, worker_id=task.assigned_worker_id, task_id=task.task_id, attempt_id=active_attempt.attempt_id if active_attempt else None, payload={"cancelled": True, "provider_outcome_unknown": provider_was_requested}, occurred_at=stamp)
+    _append_event(db, event_type=event_type, correlation_id=task.correlation_id, worker_id=task.assigned_worker_id, task_id=task.task_id, attempt_id=active_attempt.attempt_id if active_attempt else None, payload={"cancelled": True, "provider_outcome_unknown": provider_was_requested}, occurred_at=stamp, actor_type=actor_type, actor_id=actor_id)
     db.flush()
     return task
 
@@ -482,6 +499,8 @@ def set_worker_accepting_tasks(
     worker_id: str,
     accepting_tasks: bool,
     now: datetime | None = None,
+    actor_type: ActorType | str = ActorType.OPERATOR,
+    actor_id: str | None = "local_operator",
 ) -> WorkerDefinitionRecord:
     """Pause/resume scheduling without disabling the worker or touching its leases."""
     if not isinstance(accepting_tasks, bool):
@@ -512,6 +531,8 @@ def set_worker_accepting_tasks(
                 "current": accepting_tasks,
             },
             occurred_at=stamp,
+            actor_type=actor_type,
+            actor_id=actor_id,
         )
         db.flush()
     return worker
@@ -561,7 +582,7 @@ def recover_expired_leases(db: Session, *, now: datetime | None = None, base_bac
         task.lease_owner = None
         task.lease_expires_at = None
         task.updated_at = stamp
-        _append_event(db, event_type=event, correlation_id=task.correlation_id, worker_id=task.assigned_worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id if attempt else None, payload={"provider_outcome_unknown": provider_was_requested}, occurred_at=stamp)
+        _append_event(db, event_type=event, correlation_id=task.correlation_id, worker_id=task.assigned_worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id if attempt else None, payload={"provider_outcome_unknown": provider_was_requested}, occurred_at=stamp, actor_type=ActorType.SYSTEM, actor_id="system_reaper")
     db.flush()
     return recovered
 
@@ -587,6 +608,7 @@ def expire_deadline_tasks(db: Session, *, now: datetime | None = None) -> int:
             db, event_type=ActivityEventType.TASK_DEAD_LETTERED,
             correlation_id=task.correlation_id, task_id=task.task_id,
             payload={"error_code": "DEADLINE_EXPIRED"}, occurred_at=stamp,
+            actor_type=ActorType.SYSTEM, actor_id="deadline_reaper",
         )
     db.flush()
     return len(rows)

@@ -209,6 +209,7 @@ class WorkforceTaskDTO(BaseModel):
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
+    related_task_id: str | None = None
 
 
 class WorkforceTasksResponse(BaseModel):
@@ -251,6 +252,10 @@ class WorkforceActivityDTO(BaseModel):
     task_id: str | None = None
     attempt_id: str | None = None
     correlation_id: str
+    event_seq: int | None = None
+    actor_type: str = "LEGACY_UNKNOWN"
+    actor_id: str | None = None
+    related_task_id: str | None = None
 
 
 class WorkforceActivityResponse(BaseModel):
@@ -260,3 +265,55 @@ class WorkforceActivityResponse(BaseModel):
     limit: int = Field(ge=1, le=100)
     offset: int = Field(ge=0)
     events: List[WorkforceActivityDTO]
+
+
+class WorkforceTimelineEventDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_seq: int
+    event_id: str
+    task_id: str | None = None
+    event_type: str
+    occurred_at: datetime
+    actor_type: str
+    actor_id: str | None = None
+    worker_id: str | None = None
+    attempt_id: str | None = None
+    attempt_number: int | None = None
+    related_task_id: str | None = None
+    correlation_id: str
+    event_summary: dict = Field(default_factory=dict)
+
+
+class WorkforceTaskSummaryDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_id: str
+    status: str
+    title: str
+    task_type: str
+    required_capability: str
+    assigned_worker_id: str | None = None
+    requested_worker_id: str | None = None
+    priority: int
+    attempts: int
+    max_attempts: int
+    created_at: datetime
+    completed_at: datetime | None = None
+    related_task_id: str | None = None
+
+
+class WorkforceRetryLineageDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    retry_of_task_id: str | None = None
+    retried_by_task_id: str | None = None
+
+
+class WorkforceTaskTimelineResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    server_time_utc: datetime
+    task_id: str
+    task: WorkforceTaskSummaryDTO
+    retry_lineage: WorkforceRetryLineageDTO
+    total_events: int = Field(ge=0)
+    limit: int = Field(ge=1, le=200)
+    offset: int = Field(ge=0)
+    events: List[WorkforceTimelineEventDTO]

@@ -1,5 +1,5 @@
 """SQLAlchemy Core mappings untuk enam PostgreSQL views yang disetujui."""
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, JSON, MetaData, Numeric, String, Table
+from sqlalchemy import BigInteger, Boolean, Column, Date, DateTime, Float, Integer, JSON, MetaData, Numeric, String, Table
 
 metadata = MetaData()
 
@@ -121,6 +121,7 @@ v_api_workforce_tasks = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True), nullable=True),
+    Column("related_task_id", String(64), nullable=True),
 )
 
 v_api_workforce_attempts = Table(
@@ -147,6 +148,27 @@ v_api_workforce_activity = Table(
     Column("task_id", String(64), nullable=True),
     Column("attempt_id", String(64), nullable=True),
     Column("correlation_id", String(64), nullable=False),
+    Column("event_seq", BigInteger, nullable=False),
+    Column("actor_type", String(32), nullable=False),
+    Column("actor_id", String(128), nullable=True),
+    Column("related_task_id", String(64), nullable=True),
+)
+
+v_api_workforce_task_timeline = Table(
+    "v_api_workforce_task_timeline", metadata,
+    Column("event_seq", BigInteger, primary_key=True),
+    Column("event_id", String(64), nullable=False),
+    Column("task_id", String(64), nullable=True),
+    Column("event_type", String(40), nullable=False),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("actor_type", String(32), nullable=False),
+    Column("actor_id", String(128), nullable=True),
+    Column("worker_id", String(64), nullable=True),
+    Column("attempt_id", String(64), nullable=True),
+    Column("attempt_number", Integer, nullable=True),
+    Column("related_task_id", String(64), nullable=True),
+    Column("correlation_id", String(64), nullable=False),
+    Column("event_summary", JSON, nullable=False),
 )
 
 v_api_workforce_runtime = Table(

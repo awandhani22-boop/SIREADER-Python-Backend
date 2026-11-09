@@ -1,7 +1,7 @@
 """Read-only endpoints for the persistent generic workforce runtime."""
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -11,10 +11,13 @@ from app.api.schemas import (
     WorkforceAttemptsResponse, WorkforceAttemptDTO,
     WorkforceRuntimeDTO, WorkforceRuntimeResponse, WorkforceWorkerDTO,
     WorkforceTaskDTO, WorkforceTasksResponse, WorkforceTaskStatus,
+    WorkforceTimelineEventDTO, WorkforceTaskSummaryDTO, WorkforceRetryLineageDTO,
+    WorkforceTaskTimelineResponse,
 )
 from app.api.views import (
     v_api_workforce_activity, v_api_workforce_attempts,
     v_api_workforce_runtime, v_api_workforce_tasks, v_api_workforce_workers,
+    v_api_workforce_task_timeline,
 )
 
 router = APIRouter(prefix="/api/v1/workforce", tags=["workforce"])
@@ -124,4 +127,68 @@ def get_workforce_activity(
         limit=limit,
         offset=offset,
         events=[WorkforceActivityDTO(**dict(row)) for row in rows],
+    )
+
+
+
+@router.get("/tasks/{task_id}/timeline", response_model=WorkforceTaskTimelineResponse)
+def get_workforce_task_timeline(
+    task_id: str = Path(min_length=8, max_length=64),
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=100_000),
+    session: Session = Depends(get_ro_session),
+) -> WorkforceTaskTimelineResponse:
+    task_row = session.execute(
+        select(v_api_workforce_tasks)
+        .where(v_api_workforce_tasks.c.task_id == task_id)
+        .limit(1)
+    ).mappings().one_or_none()
+    if task_row is None:
+        raise HTTPException(status_code=404, detail="Workforce task was not found.")
+
+    retried_by_task_id = session.scalar(
+        select(v_api_workforce_tasks.c.task_id)
+        .where(v_api_workforce_tasks.c.related_task_id == task_id)
+        .limit(1)
+    )
+
+    table = v_api_workforce_task_timeline
+    conditions = [table.c.task_id == task_id]
+    total_events = int(session.scalar(select(func.count()).select_from(table).where(*conditions)) or 0)
+    event_rows = session.execute(
+        select(table).where(*conditions)
+        .order_by(table.c.event_seq.asc())
+        .limit(limit).offset(offset)
+    ).mappings().all()
+
+    task_summary = WorkforceTaskSummaryDTO(
+        task_id=task_row["task_id"],
+        status=task_row["status"],
+        title=task_row["title"],
+        task_type=task_row["task_type"],
+        required_capability=task_row["required_capability"],
+        assigned_worker_id=task_row["assigned_worker_id"],
+        requested_worker_id=task_row["requested_worker_id"],
+        priority=task_row["priority"],
+        attempts=task_row["attempts"],
+        max_attempts=task_row["max_attempts"],
+        created_at=task_row["created_at"],
+        completed_at=task_row["completed_at"],
+        related_task_id=task_row["related_task_id"],
+    )
+    retry_lineage = WorkforceRetryLineageDTO(
+        retry_of_task_id=task_row["related_task_id"],
+        retried_by_task_id=retried_by_task_id,
+    )
+    events = [WorkforceTimelineEventDTO(**dict(r)) for r in event_rows]
+
+    return WorkforceTaskTimelineResponse(
+        server_time_utc=_now(),
+        task_id=task_id,
+        task=task_summary,
+        retry_lineage=retry_lineage,
+        total_events=total_events,
+        limit=limit,
+        offset=offset,
+        events=events,
     )

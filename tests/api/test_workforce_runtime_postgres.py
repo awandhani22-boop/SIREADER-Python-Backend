@@ -45,6 +45,8 @@ def test_workforce_migration_security_and_task_lifecycle():
     command_migration_name = "2026_11_09_workforce_commands_v1.sql"
     command_rollback_name = "2026_11_09_workforce_commands_v1_rollback.sql"
     views_rollback_name = "2026_11_09_workforce_api_views_v1_rollback.sql"
+    timeline_migration_name = "2026_11_09_workforce_timeline_v2.sql"
+    timeline_rollback_name = "2026_11_09_workforce_timeline_v2_rollback.sql"
 
     with psycopg.connect(PSYCOPG_URL, autocommit=True) as admin:
         roles = {row[0] for row in admin.execute("SELECT rolname FROM pg_roles WHERE rolname IN ('sireader_view_owner', 'sireader_api_ro', 'sireader_workforce_cmd')")}
@@ -56,7 +58,7 @@ def test_workforce_migration_security_and_task_lifecycle():
         # always tested from their actual pre-Phase-5 schema, not against a
         # previously upgraded view with an extra accepting_tasks column.
         for view_name in (
-            "v_api_workforce_runtime", "v_api_workforce_activity",
+            "v_api_workforce_task_timeline", "v_api_workforce_runtime", "v_api_workforce_activity",
             "v_api_workforce_attempts", "v_api_workforce_tasks",
             "v_api_workforce_workers",
         ):
@@ -77,6 +79,8 @@ def test_workforce_migration_security_and_task_lifecycle():
             _run_migration(admin, root, views_migration_name)  # idempotent view replacement
             _run_migration(admin, root, command_migration_name)
             _run_migration(admin, root, command_migration_name)  # idempotent command boundary
+            _run_migration(admin, root, timeline_migration_name)
+            _run_migration(admin, root, timeline_migration_name)  # idempotent timeline boundary
             counts = admin.execute(
                 """
                 SELECT
@@ -365,6 +369,7 @@ def test_workforce_migration_security_and_task_lifecycle():
                 assert [item.payload for item in notices] == ["workforce"]
 
         finally:
+            _run_migration(admin, root, timeline_rollback_name)
             _run_migration(admin, root, command_rollback_name)
             _run_migration(admin, root, views_rollback_name)
             _run_migration(admin, root, rollback_name)

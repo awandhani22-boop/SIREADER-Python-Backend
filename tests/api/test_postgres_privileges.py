@@ -328,15 +328,18 @@ def postgres_security_engine():
         ):
             connection.exec_driver_sql(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
         for table_name in (
-            "workforce_activity_events", "workforce_task_attempts", "workforce_tasks",
+            "workforce_command_audit", "workforce_activity_events", "workforce_task_attempts", "workforce_tasks",
             "workforce_heartbeats", "workforce_worker_capabilities",
             "workforce_capabilities", "workforce_workers",
         ):
             connection.exec_driver_sql(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
         connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_notify_workforce_v1()")
-        connection.exec_driver_sql("DROP ROLE IF EXISTS sireader_workforce_cmd")
-        connection.exec_driver_sql("DROP ROLE IF EXISTS sireader_api_ro")
-        connection.exec_driver_sql("DROP ROLE IF EXISTS sireader_view_owner")
+        for role_name in ("sireader_workforce_cmd", "sireader_api_ro", "sireader_view_owner"):
+            connection.exec_driver_sql(
+                f"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role_name}') THEN "
+                f"EXECUTE 'DROP OWNED BY {role_name} CASCADE'; END IF; END $$;"
+            )
+            connection.exec_driver_sql(f"DROP ROLE IF EXISTS {role_name}")
 
         for statement in ROLE_DDL:
             connection.exec_driver_sql(statement)

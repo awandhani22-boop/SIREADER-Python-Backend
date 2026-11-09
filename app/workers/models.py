@@ -2,13 +2,20 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from enum import Enum
 from sqlalchemy import (
-    JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer,
+    JSON, BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Identity, Index, Integer,
     Numeric, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.models import Base
+
+class ActorType(str, Enum):
+    SYSTEM = "SYSTEM"
+    WORKER = "WORKER"
+    OPERATOR = "OPERATOR"
+    LEGACY_UNKNOWN = "LEGACY_UNKNOWN"
 
 
 class WorkerDefinitionRecord(Base):
@@ -105,6 +112,7 @@ class WorkTaskRecord(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payload_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payload_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    related_task_id: Mapped[str | None] = mapped_column(ForeignKey("workforce_tasks.task_id", ondelete="SET NULL"), nullable=True)
 
 
 class WorkTaskAttemptRecord(Base):
@@ -135,15 +143,21 @@ class WorkTaskAttemptRecord(Base):
 class WorkActivityEventRecord(Base):
     __tablename__ = "workforce_activity_events"
     __table_args__ = (
+        CheckConstraint("actor_type IN ('SYSTEM', 'WORKER', 'OPERATOR', 'LEGACY_UNKNOWN')", name="ck_workforce_activity_actor_type"),
         Index("ix_workforce_activity_created", "occurred_at"),
         Index("ix_workforce_activity_task_created", "task_id", "occurred_at"),
+        Index("ix_workforce_activity_task_seq", "task_id", "event_seq"),
     )
+    event_seq: Mapped[int | None] = mapped_column(BigInteger, Identity(always=True), nullable=True)
     event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(40), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    actor_type: Mapped[str] = mapped_column(String(32), nullable=False, default=ActorType.LEGACY_UNKNOWN.value)
+    actor_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     attempt_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    related_task_id: Mapped[str | None] = mapped_column(ForeignKey("workforce_tasks.task_id", ondelete="SET NULL"), nullable=True)
     correlation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 

@@ -13,11 +13,13 @@ from sqlalchemy.orm import Session
 
 from app.command_api.security import enforce_command_rate_limit, verify_command_bearer
 from app.command_api.service import CommandConflictError, execute_idempotent_command
-from app.workers.models import WorkTaskAttemptRecord, WorkTaskRecord
+from app.workers.models import ActorType, WorkTaskAttemptRecord, WorkTaskRecord
 from app.workers.registry import CAPABILITY_CATALOG
+from app.workers.runtime_contract import ActivityEventType
 from app.workers.repository import (
     WorkforceRepositoryError,
     WorkerUnavailableError,
+    _append_event,
     cancel_task,
     enqueue_task,
     set_worker_accepting_tasks,
@@ -234,7 +236,7 @@ def cancel_non_trading_task(
         if original is None:
             raise WorkforceRepositoryError("task not found")
         _eligible_task(original)
-        task = cancel_task(db, task_id=request.task_id)
+        task = cancel_task(db, task_id=request.task_id, actor_type=ActorType.OPERATOR, actor_id="local_operator")
         return task.task_id, {
             "accepted": True,
             "status": task.status,
@@ -292,7 +294,25 @@ def retry_failed_non_trading_task(
             correlation_id=original.correlation_id,
             requested_worker_id=original.requested_worker_id,
             max_attempts=original.max_attempts,
+            actor_type=ActorType.OPERATOR,
+            actor_id="local_operator",
+            related_task_id=original.task_id,
         )
+        if created:
+            _append_event(
+                db,
+                event_type=ActivityEventType.TASK_RETRIED,
+                correlation_id=original.correlation_id,
+                task_id=original.task_id,
+                related_task_id=new_task.task_id,
+                actor_type=ActorType.OPERATOR,
+                actor_id="local_operator",
+                payload={
+                    "retried_into_task_id": new_task.task_id,
+                    "retry_of_task_id": original.task_id,
+                },
+            )
+            db.flush()
         return new_task.task_id, {
             "accepted": True, "created": created, "status": new_task.status,
             "task_id": new_task.task_id, "retry_of_task_id": original.task_id,
@@ -313,6 +333,7 @@ def set_worker_scheduling(
     def execute(correlation_id: str):
         worker = set_worker_accepting_tasks(
             db, worker_id=request.worker_id, accepting_tasks=request.accepting_tasks,
+            actor_type=ActorType.OPERATOR, actor_id="local_operator",
         )
         return worker.worker_id, {
             "accepted": True, "worker_id": worker.worker_id,
