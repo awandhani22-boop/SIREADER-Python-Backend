@@ -74,6 +74,13 @@ def sync_default_registry(db: Session) -> int:
     """Idempotently upsert the seven canonical definitions and 28 capability links."""
     registry = build_default_registry()
     now = datetime.now(timezone.utc)
+    capability_ids = {capability_id for worker in registry.values() for capability_id in worker.capability_ids}
+    existing_capabilities = {
+        row.capability_id: row
+        for row in db.execute(
+            select(WorkerCapabilityRecord).where(WorkerCapabilityRecord.capability_id.in_(capability_ids))
+        ).scalars()
+    }
     for worker in registry.values():
         row = db.get(WorkerDefinitionRecord, worker.worker_id)
         values = {
@@ -89,13 +96,15 @@ def sync_default_registry(db: Session) -> int:
                 setattr(row, key, value)
         for capability_id in worker.capability_ids:
             capability = CAPABILITY_CATALOG[capability_id]
-            cap_row = db.get(WorkerCapabilityRecord, capability_id)
+            cap_row = existing_capabilities.get(capability_id)
             cap_values = {
                 "description": capability.description, "task_types": capability.task_types,
                 "enabled": capability.enabled, "schema_version": capability.schema_version,
             }
             if cap_row is None:
-                db.add(WorkerCapabilityRecord(capability_id=capability_id, **cap_values))
+                cap_row = WorkerCapabilityRecord(capability_id=capability_id, **cap_values)
+                db.add(cap_row)
+                existing_capabilities[capability_id] = cap_row
             else:
                 for key, value in cap_values.items():
                     setattr(cap_row, key, value)
@@ -240,23 +249,22 @@ def claim_next_task(db: Session, *, worker_id: str, instance_id: str,
     ) or 0
     if active_count >= worker.max_concurrency:
         return None
-    candidates = db.execute(
+    age_bonus = func.floor(
+        func.extract("epoch", stamp - WorkTaskRecord.created_at) / (AGING_INTERVAL_MINUTES * 60)
+    )
+    effective_priority = func.least(100, WorkTaskRecord.priority + age_bonus)
+    task = db.execute(
         select(WorkTaskRecord).where(
             WorkTaskRecord.status.in_([TaskStatus.QUEUED.value, TaskStatus.RETRY_WAIT.value]),
             WorkTaskRecord.required_capability.in_(links),
             WorkTaskRecord.not_before <= stamp,
             (WorkTaskRecord.deadline_at.is_(None) | (WorkTaskRecord.deadline_at > stamp)),
             (WorkTaskRecord.requested_worker_id.is_(None) | (WorkTaskRecord.requested_worker_id == worker_id)),
-        ).order_by(WorkTaskRecord.priority.desc(), WorkTaskRecord.created_at.asc())
-        .limit(100).with_for_update(skip_locked=True)
-    ).scalars().all()
-    if not candidates:
+        ).order_by(effective_priority.desc(), WorkTaskRecord.created_at.asc(), WorkTaskRecord.task_id.asc())
+        .limit(1).with_for_update(skip_locked=True)
+    ).scalar_one_or_none()
+    if task is None:
         return None
-    def effective_priority(task: WorkTaskRecord) -> tuple[int, datetime, str]:
-        age_minutes = max(0, int((stamp - _now(task.created_at)).total_seconds() // 60))
-        score = min(100, int(task.priority) + age_minutes // AGING_INTERVAL_MINUTES)
-        return (-score, _now(task.created_at), task.task_id)
-    task = sorted(candidates, key=effective_priority)[0]
     current_status = TaskStatus(task.status)
     if current_status is TaskStatus.RETRY_WAIT:
         validate_task_transition(TaskStatus.RETRY_WAIT, TaskStatus.QUEUED)
