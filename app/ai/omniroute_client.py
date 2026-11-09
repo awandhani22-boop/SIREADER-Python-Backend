@@ -191,6 +191,7 @@ def call_ai(
     request_id=None,
     max_cost_rp=None,
     max_cost_usd=None,
+    on_reserved=None,
 ):
     """
     Memanggil satu model OmniRoute.
@@ -292,6 +293,11 @@ def call_ai(
     )
 
     request_id = reservation["request_id"]
+
+    # Optional worker-runtime hook persists the attempt/request correlation after
+    # a successful budget reservation and immediately before any network I/O.
+    if on_reserved is not None:
+        on_reserved(request_id)
 
     try:
         with urlopen(
