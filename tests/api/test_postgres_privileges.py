@@ -534,12 +534,13 @@ def test_workforce_command_role_has_only_the_declared_command_boundary(postgres_
             ):
                 # Each rejected statement runs inside its own savepoint so the
                 # verification transaction remains usable afterwards.
-                with connection.begin_nested():
-                    if statement.startswith("INSERT INTO public.workforce_command_audit"):
+                if statement.startswith("INSERT INTO public.workforce_command_audit"):
+                    with connection.begin_nested():
                         connection.exec_driver_sql(statement)
-                        # Audit INSERT is explicitly allowed.
-                    else:
-                        with pytest.raises(DBAPIError):
+                    # Audit INSERT is explicitly allowed.
+                else:
+                    with pytest.raises(DBAPIError):
+                        with connection.begin_nested():
                             connection.exec_driver_sql(statement)
 
             for statement in (
@@ -548,8 +549,8 @@ def test_workforce_command_role_has_only_the_declared_command_boundary(postgres_
                 "DELETE FROM public.workforce_command_audit "
                 "WHERE command_id = 'ci-command-audit-0001'",
             ):
-                with connection.begin_nested():
-                    with pytest.raises(DBAPIError):
+                with pytest.raises(DBAPIError):
+                    with connection.begin_nested():
                         connection.exec_driver_sql(statement)
 
             assert connection.exec_driver_sql(
