@@ -495,3 +495,28 @@ def recover_expired_leases(db: Session, *, now: datetime | None = None, base_bac
         _append_event(db, event_type=event, correlation_id=task.correlation_id, worker_id=task.assigned_worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id if attempt else None, payload={"provider_outcome_unknown": provider_was_requested}, occurred_at=stamp)
     db.flush()
     return recovered
+
+
+
+def expire_deadline_tasks(db: Session, *, now: datetime | None = None) -> int:
+    """Dead-letter queued/retry work whose deadline elapsed before execution."""
+    stamp = _now(now)
+    rows = db.execute(
+        select(WorkTaskRecord).where(
+            WorkTaskRecord.status.in_([TaskStatus.QUEUED.value, TaskStatus.RETRY_WAIT.value]),
+            WorkTaskRecord.deadline_at.is_not(None),
+            WorkTaskRecord.deadline_at <= stamp,
+        ).order_by(WorkTaskRecord.deadline_at.asc()).with_for_update(skip_locked=True)
+    ).scalars().all()
+    for task in rows:
+        validate_task_transition(TaskStatus(task.status), TaskStatus.DEAD_LETTERED)
+        task.status = TaskStatus.DEAD_LETTERED.value
+        task.failure_code = "DEADLINE_EXPIRED"
+        task.updated_at = stamp
+        _append_event(
+            db, event_type=ActivityEventType.TASK_DEAD_LETTERED,
+            correlation_id=task.correlation_id, task_id=task.task_id,
+            payload={"error_code": "DEADLINE_EXPIRED"}, occurred_at=stamp,
+        )
+    db.flush()
+    return len(rows)
