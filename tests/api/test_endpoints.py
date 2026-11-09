@@ -113,6 +113,7 @@ def test_workforce_runtime_endpoint_returns_authenticated_worker_snapshot(api_cl
             worker_id="haiku", display_name="Haiku Worker",
             role="Fast Research & Intake Specialist", department="Research",
             enabled=True, max_concurrency=2, model_tier="FAST",
+            capability_ids=["quick_research", "summarization"],
             process_status="READY", heartbeat_at=NOW, active_task_count=0,
             in_flight_provider_requests=0, schema_version=1,
             created_at=NOW, updated_at=NOW,
@@ -124,6 +125,7 @@ def test_workforce_runtime_endpoint_returns_authenticated_worker_snapshot(api_cl
     assert payload["runtime"]["ready_workers"] == 1
     assert payload["workers"][0]["worker_id"] == "haiku"
     assert payload["workers"][0]["process_status"] == "READY"
+    assert payload["workers"][0]["capability_ids"] == ["quick_research", "summarization"]
     assert "input_payload" not in payload["workers"][0]
 
 
