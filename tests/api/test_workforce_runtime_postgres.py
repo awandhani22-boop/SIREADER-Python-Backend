@@ -346,6 +346,11 @@ def test_workforce_migration_security_and_task_lifecycle():
                     assert completed.payload_expires_at == completed_at + timedelta(days=30)
                     assert review.payload_expires_at == recovery_time + timedelta(days=90)
                     retention_time = recovery_time + timedelta(days=31)
+                    # Simulate that the parent task retention boundary has actually
+                    # passed in database wall-clock time. The SQL trigger intentionally
+                    # uses clock_timestamp(), not a caller-supplied future test clock.
+                    completed.payload_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                    db.flush()
                     # A completed task whose output was sampled for human review
                     # stays protected while its review is PENDING. Expire it first.
                     assert expire_stale_reviews(db, now=retention_time) == 1
