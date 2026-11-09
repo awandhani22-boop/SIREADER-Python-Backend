@@ -85,7 +85,7 @@ def sync_default_registry(db: Session) -> int:
         row = db.get(WorkerDefinitionRecord, worker.worker_id)
         values = {
             "display_name": worker.display_name, "role": worker.role,
-            "department": worker.department, "enabled": worker.enabled,
+            "department": worker.department,
             "max_concurrency": worker.max_concurrency, "model_tier": worker.model_tier,
             "schema_version": worker.schema_version, "updated_at": now,
         }
@@ -106,13 +106,13 @@ def sync_default_registry(db: Session) -> int:
                 db.add(cap_row)
                 existing_capabilities[capability_id] = cap_row
             else:
+                cap_values.pop("enabled", None)
                 for key, value in cap_values.items():
                     setattr(cap_row, key, value)
             link = db.get(WorkerCapabilityAssignmentRecord, (worker.worker_id, capability_id))
             if link is None:
                 db.add(WorkerCapabilityAssignmentRecord(worker_id=worker.worker_id, capability_id=capability_id, enabled=True))
-            else:
-                link.enabled = True
+            # Preserve an operator's existing enabled/disabled override.
     db.flush()
     return len(registry)
 
