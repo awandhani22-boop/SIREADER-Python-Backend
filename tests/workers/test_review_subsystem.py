@@ -67,14 +67,12 @@ from app.workers.runtime_contract import (
 )
 
 DATABASE_URL = os.environ.get("SIREADER_TEST_POSTGRES_URL")
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="SIREADER_TEST_POSTGRES_URL is required for live PostgreSQL tests",
-)
 
 
 @pytest.fixture(scope="module")
 def db_engine():
+    if not DATABASE_URL:
+        pytest.skip("SIREADER_TEST_POSTGRES_URL is required for live PostgreSQL tests")
     root = Path(__file__).resolve().parents[2]
     conn_url = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
     with psycopg.connect(conn_url, autocommit=True) as admin:
@@ -1218,6 +1216,8 @@ def test_fail_closed_purge_inspection(db_session: Session, monkeypatch):
 
 
 def test_migration_forward_rollback_forward_lifecycle():
+    if not DATABASE_URL:
+        pytest.skip("SIREADER_TEST_POSTGRES_URL is required for live PostgreSQL migration tests")
     root = Path(__file__).resolve().parents[2]
     conn_url = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
     mig = (root / "migrations" / "2026_11_10_workforce_reviews_v1.sql").read_text(encoding="utf-8")
@@ -1479,6 +1479,33 @@ def test_maintenance_database_guard_rejects_non_loopback_targets(database_url):
 
     with pytest.raises(RuntimeError, match="maintenance|loopback"):
         validate_maintenance_database_url(database_url)
+
+
+@pytest.mark.parametrize("database_url", [
+    "postgresql://user:private@localhost:5432/db?host=remote.example.com",
+    "postgresql://user:private@localhost:5432/db?hostaddr=203.0.113.10",
+    "postgresql://user:private@localhost:5432/db?service=remote",
+    "postgresql://user:private@localhost:5432/db#remote",
+])
+def test_maintenance_database_guard_rejects_connection_overrides(database_url):
+    from app.workers.maintenance import validate_maintenance_database_url
+
+    with pytest.raises(RuntimeError):
+        validate_maintenance_database_url(database_url, environ={})
+
+
+@pytest.mark.parametrize("variable", [
+    "PGHOST", "PGHOSTADDR", "PGPORT", "PGSERVICE", "PGSERVICEFILE",
+    "PGLOADBALANCEHOSTS", "PGTARGETSESSIONATTRS", "PGSSLMODE",
+])
+def test_maintenance_database_guard_rejects_libpq_environment_overrides(variable):
+    from app.workers.maintenance import validate_maintenance_database_url
+
+    with pytest.raises(RuntimeError, match="override environment"):
+        validate_maintenance_database_url(
+            "postgresql://user:private@localhost:5432/sireader",
+            environ={variable: "unexpected"},
+        )
 
 
 def test_run_maintenance_once_orders_expiry_before_payload_purge(monkeypatch):

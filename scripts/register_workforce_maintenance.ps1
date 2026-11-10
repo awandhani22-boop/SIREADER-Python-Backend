@@ -46,9 +46,28 @@ function Assert-LoopbackPostgresTarget([string]$Value, [string]$Source) {
 
     $Scheme = $Parsed.Scheme.ToLowerInvariant()
     $HostName = $Parsed.DnsSafeHost.TrimStart('[').TrimEnd(']').ToLowerInvariant()
+    if (-not [string]::IsNullOrEmpty($Parsed.Query) -or
+        -not [string]::IsNullOrEmpty($Parsed.Fragment)) {
+        throw "DATABASE_URL from $Source contains query/fragment overrides; maintenance registration is blocked."
+    }
     if ($Scheme -notin @("postgres", "postgresql", "postgresql+psycopg") -or
         $HostName -notin @("localhost", "127.0.0.1", "::1")) {
         throw "DATABASE_URL from $Source is not loopback PostgreSQL. Remote, Supabase, and production targets are blocked."
+    }
+}
+
+# Refuse libpq overrides in every Windows environment scope. These variables
+# can redirect a URL that otherwise appears to target loopback PostgreSQL.
+$BlockedPgVariables = @(
+    "PGHOST", "PGHOSTADDR", "PGPORT", "PGSERVICE", "PGSERVICEFILE",
+    "PGLOADBALANCEHOSTS", "PGTARGETSESSIONATTRS", "PGSSLMODE"
+)
+foreach ($Variable in $BlockedPgVariables) {
+    foreach ($Scope in @("Process", "User", "Machine")) {
+        $Override = [Environment]::GetEnvironmentVariable($Variable, $Scope)
+        if (-not [string]::IsNullOrWhiteSpace($Override)) {
+            throw "PostgreSQL connection override environment is set; maintenance registration is blocked."
+        }
     }
 }
 
