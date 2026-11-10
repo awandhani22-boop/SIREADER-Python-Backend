@@ -135,3 +135,39 @@ Do not run concurrently with a manually started database migration. The routine 
 - `scripts/register_workforce_maintenance.ps1` registers/removes the five-minute task but has not been executed on the owner's machine; no OS-level task is claimed as registered.
 - CI uses disposable test infrastructure. It does not deploy migrations to Supabase LIVE, start a paid provider, inspect the owner's `.env`, or register a local Windows scheduled task.
 - CI uses disposable test infrastructure. It does not deploy migrations to Supabase LIVE, start a paid provider, or register a local Windows scheduled task.
+
+
+## Verified local runtime recovery and API startup — 2026-11-10
+
+The laptop already has PostgreSQL 16.6 installed and running. **Do not reinstall PostgreSQL or create another local application database.**
+
+- PostgreSQL: `127.0.0.1:5432`; data directory `C:\Users\ASUS\.gemini\antigravity\scratch\pgsql\data`.
+- Existing disposable application database: `sireader_disposable`. Both `SIREADER_API_DATABASE_URL` and `SIREADER_WORKFORCE_COMMAND_DATABASE_URL` in this backend `.env` point to it.
+- The populated `sireader_test` database is not a scratch target; do not drop tables, reset it, or use it for fixture setup.
+- Reuse Python 3.12 at `C:\SIREADER\.venv\Scripts\python.exe`; no new virtual environment is needed.
+- Local review security migration `2026_11_10_workforce_review_command_security_v1.sql` has already been applied to `sireader_disposable`. Do not apply it to Supabase LIVE.
+
+Start the existing APIs in separate PowerShell windows from the backend root:
+
+```powershell
+Set-Location 'C:\Users\ASUS\.gemini\antigravity\scratch\SIREADER-Python-Backend'
+& 'C:\SIREADER\.venv\Scripts\python.exe' -m app.api.server
+```
+
+```powershell
+Set-Location 'C:\Users\ASUS\.gemini\antigravity\scratch\SIREADER-Python-Backend'
+& 'C:\SIREADER\.venv\Scripts\python.exe' -m app.command_api.process
+```
+
+Start the existing frontend/BFF launcher from its root:
+
+```powershell
+Set-Location 'C:\Users\ASUS\.gemini\antigravity\scratch\SIREADER'
+npm run dev
+```
+
+Expected loopback ports: Python API `8000`, command API `8010`, Vite `3000`, BFF `3001`. **Do not run `python -m app.main` for these APIs**; it is the legacy Telegram application entrypoint.
+
+The Phase 5 maintenance command is intentionally not activated. Do not configure maintenance `DATABASE_URL`, execute purge, or register the Task Scheduler job until owner browser acceptance is complete and the owner separately authorizes that data-mutating operation. No Telegram worker, AI provider, or trading execution should be started for API acceptance.
+
+Latest local verification: frontend 415 tests + TypeScript + production build pass; backend 172 pass / 42 skipped. The skipped PostgreSQL integration tests require an isolated `SIREADER_TEST_POSTGRES_URL`; never point them at a populated application database. BFF/browser LIVE DTO contracts now include the Phase 5.2.1 task lineage and activity audit fields.
