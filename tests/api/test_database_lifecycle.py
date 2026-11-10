@@ -120,9 +120,11 @@ def test_get_ro_session_dependency_always_closes():
         factory.close()
 
 
-def test_ro_session_factory_concurrent_first_request(monkeypatch):
-    """Memastikan inisialisasi pada first-request concurrent dengan barrier aman terhadap race condition dan hanya membuat satu engine."""
-    monkeypatch.setattr(api_settings, "SIREADER_API_DATABASE_URL", "sqlite:///:memory:")
+def test_ro_session_factory_concurrent_first_request(monkeypatch, tmp_path):
+    """Concurrent first-request initialization uses independent SQLite pool connections."""
+    database_path = (tmp_path / "concurrent-first-request.sqlite3").as_posix()
+    # Avoid sharing one in-memory StaticPool connection across ten concurrent threads.
+    monkeypatch.setattr(api_settings, "SIREADER_API_DATABASE_URL", f"sqlite:///{database_path}")
     factory = ReadOnlySessionFactory()
     assert factory.is_initialized is False
 

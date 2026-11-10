@@ -1,4 +1,4 @@
-﻿-- SIREADER Phase 5.2.2 — preserve the non-trading retry audit event under command-role RLS.
+-- SIREADER Phase 5.2.2 — preserve the non-trading retry audit event under command-role RLS.
 -- Applies only to explicitly named disposable/test databases; never Supabase LIVE.
 BEGIN;
 DO $guard$

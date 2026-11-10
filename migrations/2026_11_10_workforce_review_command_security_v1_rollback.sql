@@ -1,4 +1,4 @@
-﻿-- Rollback for workforce_review_command_security_v1.sql.
+-- Rollback for workforce_review_command_security_v1.sql.
 -- Deliberately keeps RLS enabled on review tables with no command policies (deny by default).
 BEGIN;
 DO $guard$

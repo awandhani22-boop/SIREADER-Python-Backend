@@ -284,11 +284,28 @@ SEED_DML = [
     """,
     """
     INSERT INTO public.ai_usage_logs
-    (usage_date, provider, model, tier, input_tokens, output_tokens,
+    (request_id, usage_date, provider, model, tier, input_tokens, output_tokens,
      cache_read_tokens, cache_write_tokens, thinking_tokens, billing_currency,
      cost_rp, reserved_rp, cost_usd, reserved_usd, status, created_at, completed_at)
-    VALUES (current_date, 'ci', 'ci-model', 'FAST', 5, 7, 0, 0, 0, 'IDR',
+    VALUES ('ci-budget-request', current_date, 'ci', 'ci-model', 'FAST', 5, 7, 0, 0, 0, 'IDR',
             100, 20, 900, 900, 'COMPLETED', now(), now())
+    """,
+    """
+    INSERT INTO public.workforce_tasks
+        (task_id, idempotency_key, correlation_id, schema_version, task_type,
+         title, required_capability, requested_worker_id, priority, status,
+         attempts, max_attempts, not_before, created_at, updated_at,
+         completed_at, input_payload)
+    VALUES ('budget-fixture-task', 'idem-budget-fixture', 'corr-budget-fixture', 1,
+            'SUMMARIZATION', 'Budget view fixture', 'summarization', 'haiku',
+            50, 'COMPLETED', 1, 2, now(), now(), now(), now(), '{}'::jsonb)
+    """,
+    """
+    INSERT INTO public.workforce_task_attempts
+        (attempt_id, task_id, attempt_number, worker_id, lease_token, status,
+         provider_request_id, started_at, finished_at, created_at)
+    VALUES ('budget-fixture-attempt', 'budget-fixture-task', 1, 'haiku',
+            'lease-budget-fixture', 'COMPLETED', 'ci-budget-request', now(), now(), now())
     """,
     """
     INSERT INTO public.ai_analysis_logs (chat_id, target_message_id, status, created_at)
@@ -427,9 +444,11 @@ def test_postgres_effective_role_and_privilege_boundary(postgres_security_engine
             ).mappings().all()
             expected_rows = {
                 "v_api_workforce_workers": 7,
-                "v_api_workforce_tasks": 0,
-                "v_api_workforce_attempts": 0,
+                "v_api_workforce_tasks": 1,  # One task backs the budget-view provider-request join fixture.
+                "v_api_workforce_attempts": 1,
                 "v_api_workforce_activity": 0,
+                "v_api_workforce_task_reviews": 0,
+                "v_api_workforce_task_timeline": 0,
             }.get(view_name, 1)
             assert len(rows) == expected_rows, f"{view_name} returned an unexpected row count"
 
@@ -753,6 +772,7 @@ def test_workforce_command_role_can_adjudicate_reviews_with_scoped_rls(postgres_
                     adjusted_output={"edited": "approved text"},
                 )
                 db.flush()
+                db.commit()  # Release the session savepoint; keep the outer transaction open for assertions.
 
             approved = connection.execute(text(
                 "SELECT result_payload FROM public.workforce_tasks WHERE task_id = 'ci-review-approved-task'"
@@ -818,6 +838,7 @@ def test_workforce_command_role_can_append_non_trading_retry_lineage_event(postg
                 "correlation_id": f"corr-{suffix}",
                 "child_id": child_id,
             })
+            connection.exec_driver_sql("RESET ROLE")  # Command role is INSERT-only; read the result as the test owner.
             count = connection.execute(text("""
                 SELECT count(*) FROM public.workforce_activity_events
                 WHERE event_id = :event_id AND event_type = 'TASK_RETRIED'

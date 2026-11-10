@@ -1,4 +1,4 @@
-﻿-- SIREADER Phase 5.2.2 — close the database security boundary for human review adjudication.
+-- SIREADER Phase 5.2.2 — close the database security boundary for human review adjudication.
 -- Applies only to the loopback disposable PostgreSQL databases used by local/CI acceptance.
 -- Never apply to Supabase LIVE or production.
 BEGIN;

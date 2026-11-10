@@ -31,7 +31,7 @@ secara ketat di level database tetap merupakan security boundary utama yang mutl
 import threading
 from typing import Any, Callable
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -115,13 +115,17 @@ def create_ro_engine(
     is_sqlite = database_url.startswith("sqlite")
 
     if is_sqlite:
-        # Konfigurasi pengujian SQLite in-memory
-        engine_instance = create_engine(
-            database_url,
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-            execution_options={"postgresql_readonly": True},
-        )
+        # StaticPool is required for in-memory SQLite so all sessions see the same
+        # database. File-backed SQLite should retain its normal per-connection pool;
+        # sharing one DBAPI connection across concurrent threads is not safe.
+        sqlite_url = make_url(database_url)
+        sqlite_options = {
+            "connect_args": {"check_same_thread": False},
+            "execution_options": {"postgresql_readonly": True},
+        }
+        if sqlite_url.database in (None, "", ":memory:"):
+            sqlite_options["poolclass"] = StaticPool
+        engine_instance = create_engine(database_url, **sqlite_options)
     else:
         # Konfigurasi PostgreSQL Supabase Pooler (psycopg 3)
         engine_instance = create_engine(

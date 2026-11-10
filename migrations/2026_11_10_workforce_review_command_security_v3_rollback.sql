@@ -1,4 +1,4 @@
-﻿-- Rollback v3 to EDITED-only UPDATE USING policy.
+-- Rollback v3 to EDITED-only UPDATE USING policy.
 BEGIN;
 DO $guard$
 DECLARE db_owner text;

@@ -1,4 +1,4 @@
-﻿-- Rollback v2 to the Phase 5.2.2 v1 activity policy (no TASK_RETRIED command event).
+-- Rollback v2 to the Phase 5.2.2 v1 activity policy (no TASK_RETRIED command event).
 -- Use only on the same explicitly named disposable/test targets.
 BEGIN;
 DO $guard$

@@ -1,4 +1,4 @@
-﻿-- SIREADER Phase 5.2.2 — permit locking PENDING quarantined payloads without permitting edits.
+-- SIREADER Phase 5.2.2 — permit locking PENDING quarantined payloads without permitting edits.
 -- SELECT ... FOR UPDATE is subject to UPDATE RLS policies in PostgreSQL.
 BEGIN;
 DO $guard$
