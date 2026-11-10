@@ -185,3 +185,8 @@ Local migration `2026_11_10_workforce_review_command_security_v3.sql` is applied
 The activity ORM mapping now disables implicit `RETURNING` for `WorkActivityEventRecord`, so inserting an audit event does not require SELECT privilege on `event_seq` or the append-only activity ledger. The command role remains INSERT-only on that ledger.
 
 A transaction-scoped local verification passed APPROVE (original payload release), EDIT (sanitized adjusted payload release), and both immutable review audit inserts under `sireader_workforce_cmd`. All synthetic rows/events were rolled back; no acceptance fixture remains. Backend local suite: 172 passed / 44 skipped; skipped PostgreSQL integration coverage runs in CI with `SIREADER_TEST_POSTGRES_URL`.
+
+
+### REJECT adjudication verification — 2026-11-10
+
+A transaction-scoped probe under `sireader_workforce_cmd` passed REJECT: the review transitions to REJECTED, task `result_payload` remains NULL (the quarantined output is not released), and `HUMAN_REVIEW_REJECTED` is appended. Synthetic task/review/payload/event rows were rolled back. Database-level APPROVE, EDIT and REJECT paths now all pass; authenticated browser acceptance remains a separate open gate.
