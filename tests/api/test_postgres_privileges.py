@@ -1,4 +1,4 @@
-"""PostgreSQL integration test for the eleven-view security boundary.
+"""PostgreSQL integration test for the fourteen-view security boundary.
 
 This test runs only against an explicitly supplied disposable CI database.
 It never connects to Supabase or to the user's production database.
@@ -327,13 +327,18 @@ def postgres_security_engine():
             "ai_pending_messages", "trade_decision_watches", "approval_decisions",
         ):
             connection.exec_driver_sql(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
+        for table_name in ("workforce_task_review_payloads", "workforce_task_reviews"):
+            connection.exec_driver_sql(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
         for table_name in (
             "workforce_command_audit", "workforce_activity_events", "workforce_task_attempts", "workforce_tasks",
             "workforce_heartbeats", "workforce_worker_capabilities",
             "workforce_capabilities", "workforce_workers",
         ):
             connection.exec_driver_sql(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
-        connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_notify_workforce_v1()")
+        connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_notify_workforce_v1() CASCADE")
+        connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_guard_workforce_result_release_v1() CASCADE")
+        connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_guard_review_payloads_v1() CASCADE")
+        connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_guard_review_metadata_v1() CASCADE")
         for role_name in ("sireader_workforce_cmd", "sireader_api_ro", "sireader_view_owner"):
             connection.exec_driver_sql(
                 f"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role_name}') THEN "
@@ -361,6 +366,12 @@ def postgres_security_engine():
             "2026_11_09_workforce_runtime_v1.sql",
             "2026_11_09_workforce_api_views_v1.sql",
             "2026_11_09_workforce_commands_v1.sql",
+            "2026_11_09_workforce_timeline_v2.sql",
+            "2026_11_10_workforce_reviews_v1.sql",
+            "2026_11_10_workforce_review_creation_boundary_v3.sql",
+            "2026_11_10_workforce_review_payload_insert_guard_v2.sql",
+            "2026_11_10_workforce_budget_observability_v1.sql",
+            "2026_11_10_workforce_review_command_security_v1.sql",
         ):
             admin.execute((migration_root / migration_name).read_text(), prepare=False)
 
@@ -639,3 +650,120 @@ def test_workforce_command_role_has_only_the_declared_command_boundary(postgres_
             assert connection.exec_driver_sql(
                 "SELECT count(*) FROM public.workforce_command_audit"
             ).scalar_one() == 1
+
+
+
+def test_workforce_command_role_can_adjudicate_reviews_with_scoped_rls(postgres_security_engine):
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy.orm import Session as OrmSession
+    from app.command_api.database import validate_command_database_security
+    from app.workers.repository import adjudicate_review
+
+    now = datetime.now(timezone.utc)
+    safe_rows = [
+        ("ci-review-approved-task", "ci-review-approved-attempt", "ci-review-approved", "a" * 64, {"approved": "original"}),
+        ("ci-review-edited-task", "ci-review-edited-attempt", "ci-review-edited", "b" * 64, {"edited": "original"}),
+    ]
+    trading = ("ci-review-trading-task", "ci-review-trading-attempt", "ci-review-trading")
+
+    with postgres_security_engine.begin() as admin:
+        for task_id, attempt_id, review_id, digest, payload in safe_rows:
+            admin.execute(text("""
+                INSERT INTO public.workforce_tasks
+                    (task_id, idempotency_key, correlation_id, schema_version, task_type,
+                     title, required_capability, requested_worker_id, priority, status,
+                     attempts, max_attempts, not_before, created_at, updated_at,
+                     completed_at, input_payload)
+                VALUES (:task_id, :idem, :corr, 1, 'SUMMARIZATION', 'Review acceptance',
+                        'summarization', 'haiku', 50, 'COMPLETED', 1, 2,
+                        :now, :now, :now, :now, '{}'::jsonb)
+            """), {"task_id": task_id, "idem": "idem-"+task_id, "corr": "corr-"+task_id, "now": now})
+            admin.execute(text("""
+                INSERT INTO public.workforce_task_attempts
+                    (attempt_id, task_id, attempt_number, worker_id, lease_token,
+                     status, started_at, finished_at, created_at)
+                VALUES (:attempt_id, :task_id, 1, 'haiku', :lease, 'COMPLETED',
+                        :now, :now, :now)
+            """), {"attempt_id": attempt_id, "task_id": task_id, "lease": "lease-"+attempt_id, "now": now})
+            admin.execute(text("""
+                INSERT INTO public.workforce_task_reviews
+                    (review_id, task_id, attempt_id, status, original_output_sha256,
+                     review_expires_at, created_at, updated_at)
+                VALUES (:review_id, :task_id, :attempt_id, 'PENDING', :digest,
+                        :expires, :now, :now)
+            """), {"review_id": review_id, "task_id": task_id, "attempt_id": attempt_id,
+                   "digest": digest, "expires": now + timedelta(days=1), "now": now})
+            admin.execute(text("""
+                INSERT INTO public.workforce_task_review_payloads
+                    (review_id, original_output, created_at, updated_at)
+                VALUES (:review_id, CAST(:payload AS jsonb), :now, :now)
+            """), {"review_id": review_id, "payload": __import__('json').dumps(payload), "now": now})
+
+        task_id, attempt_id, review_id = trading
+        admin.execute(text("""
+            INSERT INTO public.workforce_tasks
+                (task_id, idempotency_key, correlation_id, schema_version, task_type,
+                 title, required_capability, requested_worker_id, priority, status,
+                 attempts, max_attempts, not_before, created_at, updated_at,
+                 completed_at, input_payload)
+            VALUES (:task_id, :idem, :corr, 1, 'RULE_VALIDATION', 'Trading review fixture',
+                    'rule_validation', 'decision_engineer', 50, 'COMPLETED', 1, 2,
+                    :now, :now, :now, :now, '{}'::jsonb)
+        """), {"task_id": task_id, "idem": "idem-"+task_id, "corr": "corr-"+task_id, "now": now})
+        admin.execute(text("""
+            INSERT INTO public.workforce_task_attempts
+                (attempt_id, task_id, attempt_number, worker_id, lease_token,
+                 status, started_at, finished_at, created_at)
+            VALUES (:attempt_id, :task_id, 1, 'decision_engineer', :lease, 'COMPLETED',
+                    :now, :now, :now)
+        """), {"attempt_id": attempt_id, "task_id": task_id, "lease": "lease-"+attempt_id, "now": now})
+        admin.execute(text("""
+            INSERT INTO public.workforce_task_reviews
+                (review_id, task_id, attempt_id, status, original_output_sha256,
+                 review_expires_at, created_at, updated_at)
+            VALUES (:review_id, :task_id, :attempt_id, 'PENDING', repeat('c', 64),
+                    :expires, :now, :now)
+        """), {"review_id": review_id, "task_id": task_id, "attempt_id": attempt_id,
+               "expires": now + timedelta(days=1), "now": now})
+        admin.execute(text("""
+            INSERT INTO public.workforce_task_review_payloads
+                (review_id, original_output, created_at, updated_at)
+            VALUES (:review_id, '{"trading":"must stay hidden"}'::jsonb, :now, :now)
+        """), {"review_id": review_id, "now": now})
+
+    with postgres_security_engine.connect() as connection:
+        with connection.begin():
+            connection.exec_driver_sql("SET LOCAL ROLE sireader_workforce_cmd")
+            with OrmSession(bind=connection, join_transaction_mode="create_savepoint") as db:
+                validate_command_database_security(db)
+                assert db.execute(
+                    text("SELECT count(*) FROM public.workforce_task_reviews WHERE review_id = :id"),
+                    {"id": trading[2]},
+                ).scalar_one() == 0
+
+                adjudicate_review(
+                    db, review_id="ci-review-approved", decision="APPROVED",
+                    operator_id="local_operator", expected_sha256="a" * 64,
+                )
+                adjudicate_review(
+                    db, review_id="ci-review-edited", decision="EDITED",
+                    operator_id="local_operator", expected_sha256="b" * 64,
+                    adjusted_output={"edited": "approved text"},
+                )
+                db.flush()
+
+            approved = connection.execute(text(
+                "SELECT result_payload FROM public.workforce_tasks WHERE task_id = 'ci-review-approved-task'"
+            )).scalar_one()
+            edited = connection.execute(text(
+                "SELECT result_payload FROM public.workforce_tasks WHERE task_id = 'ci-review-edited-task'"
+            )).scalar_one()
+            assert approved == {"approved": "original"}
+            assert edited == {"edited": "approved text"}
+
+            with pytest.raises(DBAPIError):
+                with connection.begin_nested():
+                    connection.exec_driver_sql(
+                        "UPDATE public.workforce_tasks SET result_payload = '{\"forged\":true}'::jsonb "
+                        "WHERE task_id = 'ci-review-approved-task'"
+                    )

@@ -42,6 +42,9 @@ APPROVED_VIEW_NAMES = (
     "v_api_workforce_attempts",
     "v_api_workforce_activity",
     "v_api_workforce_runtime",
+    "v_api_workforce_ai_usage",
+    "v_api_workforce_task_reviews",
+    "v_api_workforce_task_timeline",
 )
 
 PRIVILEGE_AUDIT_SQL = """
@@ -60,7 +63,9 @@ base_tables(table_name) AS (
         ('workforce_heartbeats'),
         ('workforce_tasks'),
         ('workforce_task_attempts'),
-        ('workforce_activity_events')
+        ('workforce_activity_events'),
+        ('workforce_task_reviews'),
+        ('workforce_task_review_payloads')
 ),
 table_privileges(privilege_name) AS (
     VALUES
@@ -82,7 +87,10 @@ view_names(view_name) AS (
         ('v_api_workforce_tasks'),
         ('v_api_workforce_attempts'),
         ('v_api_workforce_activity'),
-        ('v_api_workforce_runtime')
+        ('v_api_workforce_runtime'),
+        ('v_api_workforce_ai_usage'),
+        ('v_api_workforce_task_reviews'),
+        ('v_api_workforce_task_timeline')
 ),
 protected_objects(object_name) AS (
     SELECT table_name FROM base_tables
@@ -218,7 +226,32 @@ view_owner_columns(table_name, column_name) AS (
         ('workforce_activity_events', 'worker_id'),
         ('workforce_activity_events', 'task_id'),
         ('workforce_activity_events', 'attempt_id'),
-        ('workforce_activity_events', 'correlation_id')
+        ('workforce_activity_events', 'correlation_id'),
+        ('ai_usage_logs', 'request_id'),
+        ('workforce_task_attempts', 'provider_request_id'),
+        ('workforce_tasks', 'related_task_id'),
+        ('workforce_activity_events', 'event_seq'),
+        ('workforce_activity_events', 'actor_type'),
+        ('workforce_activity_events', 'actor_id'),
+        ('workforce_activity_events', 'related_task_id'),
+        ('workforce_activity_events', 'payload'),
+        ('workforce_task_reviews', 'review_id'),
+        ('workforce_task_reviews', 'task_id'),
+        ('workforce_task_reviews', 'attempt_id'),
+        ('workforce_task_reviews', 'status'),
+        ('workforce_task_reviews', 'original_output_sha256'),
+        ('workforce_task_reviews', 'adjusted_output_sha256'),
+        ('workforce_task_reviews', 'adjudicated_by'),
+        ('workforce_task_reviews', 'adjudicated_at'),
+        ('workforce_task_reviews', 'reason_code'),
+        ('workforce_task_reviews', 'notes'),
+        ('workforce_task_reviews', 'review_expires_at'),
+        ('workforce_task_reviews', 'created_at'),
+        ('workforce_task_reviews', 'updated_at'),
+        ('workforce_task_review_payloads', 'review_id'),
+        ('workforce_task_review_payloads', 'original_output'),
+        ('workforce_task_review_payloads', 'adjusted_output'),
+        ('workforce_task_review_payloads', 'payload_purged_at')
 ),
 view_rows AS (
     SELECT
@@ -498,12 +531,12 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
         raise RuntimeError("sireader_view_owner has privileges on unapproved base-table columns.")
     if snapshot.get("owner_column_allowlist_ok") is not True:
         raise RuntimeError("sireader_view_owner lacks one or more approved base-table column grants.")
-    if snapshot.get("approved_view_count") != 11:
-        raise RuntimeError("All eleven approved API views must exist before the API can start.")
+    if snapshot.get("approved_view_count") != 14:
+        raise RuntimeError("All fourteen approved API views must exist before the API can start.")
     if snapshot.get("approved_view_owners_ok") is not True:
         raise RuntimeError("All approved API views must be owned by sireader_view_owner.")
     if snapshot.get("approved_view_select_ok") is not True:
-        raise RuntimeError("sireader_api_ro must have SELECT on all six approved API views.")
+        raise RuntimeError("sireader_api_ro must have SELECT on every approved API view.")
     if snapshot.get("view_owner_attributes_ok") is not True:
         raise RuntimeError("sireader_view_owner role attributes violate the least-privilege policy.")
 

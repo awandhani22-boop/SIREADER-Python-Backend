@@ -11,6 +11,8 @@ ALLOWED_RELATIONS = frozenset({
     "workforce_task_attempts",
     "workforce_activity_events",
     "workforce_command_audit",
+    "workforce_task_reviews",
+    "workforce_task_review_payloads",
 })
 
 EXPECTED_TABLE_PRIVILEGES = {
@@ -21,14 +23,21 @@ EXPECTED_TABLE_PRIVILEGES = {
     "workforce_task_attempts": {"SELECT"},
     "workforce_activity_events": {"INSERT"},
     "workforce_command_audit": {"SELECT", "INSERT"},
+    "workforce_task_reviews": {"SELECT"},
+    "workforce_task_review_payloads": {"SELECT"},
 }
 EXPECTED_COLUMN_UPDATES = {
     "workforce_workers": {"accepting_tasks", "updated_at"},
     "workforce_tasks": {
         "status", "updated_at", "payload_expires_at",
-        "lease_token", "lease_owner", "lease_expires_at",
+        "lease_token", "lease_owner", "lease_expires_at", "result_payload",
     },
     "workforce_task_attempts": {"status", "error_code", "finished_at"},
+    "workforce_task_reviews": {
+        "status", "adjusted_output_sha256", "adjudicated_by",
+        "adjudicated_at", "reason_code", "notes", "updated_at",
+    },
+    "workforce_task_review_payloads": {"adjusted_output", "updated_at"},
 }
 
 
@@ -92,7 +101,8 @@ def validate_command_database_security(session: Session) -> None:
     protected_tables = {
         "workforce_workers", "workforce_capabilities", "workforce_worker_capabilities",
         "workforce_tasks", "workforce_task_attempts", "workforce_activity_events",
-        "workforce_command_audit",
+        "workforce_command_audit", "workforce_task_reviews",
+        "workforce_task_review_payloads",
     }
     rls_rows = session.execute(text("""
         SELECT c.relname, c.relrowsecurity
@@ -124,6 +134,10 @@ def validate_command_database_security(session: Session) -> None:
         ("workforce_activity_events", "workforce_cmd_activity_insert", "INSERT"),
         ("workforce_command_audit", "workforce_cmd_audit_select", "SELECT"),
         ("workforce_command_audit", "workforce_cmd_audit_insert", "INSERT"),
+        ("workforce_task_reviews", "workforce_cmd_task_reviews_select", "SELECT"),
+        ("workforce_task_reviews", "workforce_cmd_task_reviews_update", "UPDATE"),
+        ("workforce_task_review_payloads", "workforce_cmd_review_payloads_select", "SELECT"),
+        ("workforce_task_review_payloads", "workforce_cmd_review_payloads_update", "UPDATE"),
     }
     found = set()
     for policy in policies:

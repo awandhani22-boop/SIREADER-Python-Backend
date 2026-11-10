@@ -429,7 +429,7 @@ def _safe_privilege_snapshot():
         "owner_has_role_memberships": False,
         "owner_unapproved_column_access": False,
         "owner_column_allowlist_ok": True,
-        "approved_view_count": 11,
+        "approved_view_count": 14,
         "approved_view_owners_ok": True,
         "approved_view_select_ok": True,
         "view_owner_attributes_ok": True,
@@ -489,7 +489,7 @@ def test_approved_views_execution_probe_checks_exact_allowlist():
 
     session = FakeSession()
     validate_approved_views_executable(session)
-    assert len(session.statements) == 11
+    assert len(session.statements) == 14
     assert all(statement.startswith("SELECT 1 FROM public.") for statement in session.statements)
     assert all(statement.endswith("LIMIT 1") for statement in session.statements)
     assert {statement.split("FROM public.", 1)[1].split()[0] for statement in session.statements} == {
@@ -504,6 +504,9 @@ def test_approved_views_execution_probe_checks_exact_allowlist():
         "v_api_workforce_attempts",
         "v_api_workforce_activity",
         "v_api_workforce_runtime",
+        "v_api_workforce_ai_usage",
+        "v_api_workforce_task_reviews",
+        "v_api_workforce_task_timeline",
     }
 
 
