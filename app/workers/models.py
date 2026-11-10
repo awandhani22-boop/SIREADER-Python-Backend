@@ -147,6 +147,10 @@ class WorkActivityEventRecord(Base):
         Index("ix_workforce_activity_created", "occurred_at"),
         Index("ix_workforce_activity_task_created", "task_id", "occurred_at"),
         Index("ix_workforce_activity_task_seq", "task_id", "event_seq"),
+        # The command role is intentionally INSERT-only on the append-only
+        # activity ledger. Do not emit INSERT ... RETURNING event_seq, which
+        # would require SELECT privilege on an otherwise unreadable table.
+        {"implicit_returning": False},
     )
     event_seq: Mapped[int | None] = mapped_column(BigInteger, Identity(always=True), nullable=True)
     event_id: Mapped[str] = mapped_column(String(64), primary_key=True)

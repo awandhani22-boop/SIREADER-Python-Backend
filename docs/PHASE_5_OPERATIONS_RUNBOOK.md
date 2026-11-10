@@ -176,3 +176,12 @@ Latest local verification: frontend 415 tests + TypeScript + production build pa
 ### Retry activity RLS follow-up — 2026-11-10
 
 The additive migration `2026_11_10_workforce_review_command_security_v2.sql` is also applied to local `sireader_disposable`. It preserves the Phase 5.1 retry command by allowing a `TASK_RETRIED` event only when both the original and newly queued task are visible to the non-trading command role. Direct insert as `sireader_workforce_cmd` passed inside a rolled-back transaction; no test event remains. The migration is included in the disposable PostgreSQL CI fixture. Do not apply either review security migration to Supabase LIVE.
+
+
+### Review adjudication and append-only audit follow-up — 2026-11-10
+
+Local migration `2026_11_10_workforce_review_command_security_v3.sql` is applied to `sireader_disposable`. It permits the command role to lock a PENDING review payload with `SELECT ... FOR UPDATE`, but only permits the row update to pass RLS when the parent review is EDITED. The existing write-once payload trigger remains active.
+
+The activity ORM mapping now disables implicit `RETURNING` for `WorkActivityEventRecord`, so inserting an audit event does not require SELECT privilege on `event_seq` or the append-only activity ledger. The command role remains INSERT-only on that ledger.
+
+A transaction-scoped local verification passed APPROVE (original payload release), EDIT (sanitized adjusted payload release), and both immutable review audit inserts under `sireader_workforce_cmd`. All synthetic rows/events were rolled back; no acceptance fixture remains. Backend local suite: 172 passed / 44 skipped; skipped PostgreSQL integration coverage runs in CI with `SIREADER_TEST_POSTGRES_URL`.

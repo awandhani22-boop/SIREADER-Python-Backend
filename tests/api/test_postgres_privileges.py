@@ -373,6 +373,7 @@ def postgres_security_engine():
             "2026_11_10_workforce_budget_observability_v1.sql",
             "2026_11_10_workforce_review_command_security_v1.sql",
             "2026_11_10_workforce_review_command_security_v2.sql",
+            "2026_11_10_workforce_review_command_security_v3.sql",
         ):
             admin.execute((migration_root / migration_name).read_text(), prepare=False)
 
@@ -822,5 +823,67 @@ def test_workforce_command_role_can_append_non_trading_retry_lineage_event(postg
                 WHERE event_id = :event_id AND event_type = 'TASK_RETRIED'
             """), {"event_id": f"evt-retry-{suffix}"}).scalar_one()
             assert count == 1
+        finally:
+            outer.rollback()
+
+
+
+def test_workforce_command_role_can_lock_pending_review_payload_but_cannot_edit_it_early(postgres_security_engine):
+    """SELECT FOR UPDATE works on PENDING payloads while UPDATE remains EDITED-only."""
+    from datetime import datetime, timedelta, timezone
+    from uuid import uuid4
+
+    suffix = uuid4().hex[:12]
+    task_id = f"payload-lock-task-{suffix}"
+    attempt_id = f"payload-lock-attempt-{suffix}"
+    review_id = f"rev_payload_lock_{suffix}"
+    now = datetime.now(timezone.utc)
+    digest = "a" * 64
+
+    with postgres_security_engine.connect() as connection:
+        outer = connection.begin()
+        try:
+            connection.execute(text("""
+                INSERT INTO public.workforce_tasks
+                    (task_id, idempotency_key, correlation_id, task_type, title,
+                     required_capability, requested_worker_id, priority, status,
+                     attempts, max_attempts, created_at, updated_at, completed_at)
+                VALUES
+                    (:task_id, :idem, :corr, 'SUMMARIZATION', 'Pending review payload lock',
+                     'summarization', 'haiku', 50, 'COMPLETED', 1, 3, :now, :now, :now)
+            """), {"task_id": task_id, "idem": f"idem-{suffix}", "corr": f"corr-{suffix}", "now": now})
+            connection.execute(text("""
+                INSERT INTO public.workforce_task_attempts
+                    (attempt_id, task_id, attempt_number, worker_id, lease_token, status, created_at)
+                VALUES (:attempt_id, :task_id, 1, 'haiku', :lease, 'COMPLETED', :now)
+            """), {"attempt_id": attempt_id, "task_id": task_id, "lease": f"lease-{suffix}", "now": now})
+            connection.execute(text("""
+                INSERT INTO public.workforce_task_reviews
+                    (review_id, task_id, attempt_id, status, original_output_sha256,
+                     review_expires_at, created_at, updated_at)
+                VALUES (:review_id, :task_id, :attempt_id, 'PENDING', :digest,
+                        :expires, :now, :now)
+            """), {"review_id": review_id, "task_id": task_id, "attempt_id": attempt_id,
+                   "digest": digest, "expires": now + timedelta(hours=24), "now": now})
+            connection.execute(text("""
+                INSERT INTO public.workforce_task_review_payloads
+                    (review_id, original_output, created_at, updated_at)
+                VALUES (:review_id, '{"safe":"original"}'::jsonb, :now, :now)
+            """), {"review_id": review_id, "now": now})
+
+            connection.exec_driver_sql("SET LOCAL ROLE sireader_workforce_cmd")
+            locked = connection.execute(text("""
+                SELECT review_id FROM public.workforce_task_review_payloads
+                WHERE review_id=:review_id FOR UPDATE
+            """), {"review_id": review_id}).scalar_one()
+            assert locked == review_id
+
+            with pytest.raises(DBAPIError):
+                with connection.begin_nested():
+                    connection.execute(text("""
+                        UPDATE public.workforce_task_review_payloads
+                        SET adjusted_output='{"unsafe":"too-early"}'::jsonb, updated_at=:now
+                        WHERE review_id=:review_id
+                    """), {"review_id": review_id, "now": now})
         finally:
             outer.rollback()
