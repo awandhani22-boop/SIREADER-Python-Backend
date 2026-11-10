@@ -372,6 +372,7 @@ def postgres_security_engine():
             "2026_11_10_workforce_review_payload_insert_guard_v2.sql",
             "2026_11_10_workforce_budget_observability_v1.sql",
             "2026_11_10_workforce_review_command_security_v1.sql",
+            "2026_11_10_workforce_review_command_security_v2.sql",
         ):
             admin.execute((migration_root / migration_name).read_text(), prepare=False)
 
@@ -767,3 +768,59 @@ def test_workforce_command_role_can_adjudicate_reviews_with_scoped_rls(postgres_
                         "UPDATE public.workforce_tasks SET result_payload = '{\"forged\":true}'::jsonb "
                         "WHERE task_id = 'ci-review-approved-task'"
                     )
+
+
+
+def test_workforce_command_role_can_append_non_trading_retry_lineage_event(postgres_security_engine):
+    """TASK_RETRIED remains writable only for two visible non-trading task rows."""
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    suffix = uuid4().hex[:12]
+    parent_id = f"retry-parent-{suffix}"
+    child_id = f"retry-child-{suffix}"
+    now = datetime.now(timezone.utc)
+
+    with postgres_security_engine.connect() as connection:
+        outer = connection.begin()
+        try:
+            for task_id, status in ((parent_id, "FAILED"), (child_id, "QUEUED")):
+                connection.execute(text("""
+                    INSERT INTO public.workforce_tasks
+                        (task_id, idempotency_key, correlation_id, task_type, title,
+                         required_capability, requested_worker_id, priority, status,
+                         attempts, max_attempts, created_at, updated_at)
+                    VALUES
+                        (:task_id, :idempotency_key, :correlation_id, 'SUMMARIZATION',
+                         'Retry RLS policy fixture', 'summarization', 'haiku', 50,
+                         :status, 1, 3, :now, :now)
+                """), {
+                    "task_id": task_id,
+                    "idempotency_key": f"idem-{task_id}",
+                    "correlation_id": f"corr-{suffix}",
+                    "status": status,
+                    "now": now,
+                })
+
+            connection.exec_driver_sql("SET LOCAL ROLE sireader_workforce_cmd")
+            connection.execute(text("""
+                INSERT INTO public.workforce_activity_events
+                    (event_id, event_type, occurred_at, task_id,
+                     correlation_id, actor_type, actor_id, related_task_id)
+                VALUES
+                    (:event_id, 'TASK_RETRIED', :now, :parent_id,
+                     :correlation_id, 'OPERATOR', 'local_operator', :child_id)
+            """), {
+                "event_id": f"evt-retry-{suffix}",
+                "now": now,
+                "parent_id": parent_id,
+                "correlation_id": f"corr-{suffix}",
+                "child_id": child_id,
+            })
+            count = connection.execute(text("""
+                SELECT count(*) FROM public.workforce_activity_events
+                WHERE event_id = :event_id AND event_type = 'TASK_RETRIED'
+            """), {"event_id": f"evt-retry-{suffix}"}).scalar_one()
+            assert count == 1
+        finally:
+            outer.rollback()

@@ -171,3 +171,8 @@ Expected loopback ports: Python API `8000`, command API `8010`, Vite `3000`, BFF
 The Phase 5 maintenance command is intentionally not activated. Do not configure maintenance `DATABASE_URL`, execute purge, or register the Task Scheduler job until owner browser acceptance is complete and the owner separately authorizes that data-mutating operation. No Telegram worker, AI provider, or trading execution should be started for API acceptance.
 
 Latest local verification: frontend 415 tests + TypeScript + production build pass; backend 172 pass / 42 skipped. The skipped PostgreSQL integration tests require an isolated `SIREADER_TEST_POSTGRES_URL`; never point them at a populated application database. BFF/browser LIVE DTO contracts now include the Phase 5.2.1 task lineage and activity audit fields.
+
+
+### Retry activity RLS follow-up — 2026-11-10
+
+The additive migration `2026_11_10_workforce_review_command_security_v2.sql` is also applied to local `sireader_disposable`. It preserves the Phase 5.1 retry command by allowing a `TASK_RETRIED` event only when both the original and newly queued task are visible to the non-trading command role. Direct insert as `sireader_workforce_cmd` passed inside a rolled-back transaction; no test event remains. The migration is included in the disposable PostgreSQL CI fixture. Do not apply either review security migration to Supabase LIVE.
