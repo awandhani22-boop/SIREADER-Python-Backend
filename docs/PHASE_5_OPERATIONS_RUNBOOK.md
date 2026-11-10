@@ -215,3 +215,8 @@ This section supersedes earlier operational-status notes in this runbook where t
 - Backend local commit: `10a2f96`; frontend implementation/docs commits remain local. No GitHub push/merge.
 - Phase 5 implementation and applicable automated/operational acceptance are complete. The next real PENDING review is an owner-operated business action, not a fabricated acceptance fixture. Phase 6 remains unstarted.
 - No Supabase LIVE migration, paid provider call, Telegram, MT5/HFM, or trading action was performed.
+
+### Fresh PostgreSQL cluster replay - 2026-11-10 16:44 local
+
+- Reinitialized a fresh PostgreSQL 16.6 test cluster and empty `sireader_test` database on isolated loopback port 55432. The privilege/security fixture preflight passed 20/20; the subsequent complete backend `tests/` suite passed **229 passed, 0 failed, 0 skipped** (one Starlette/httpx deprecation warning).
+- The test cluster was gracefully stopped and both temporary test data directories were removed. Port 55432 is free. No application database or Supabase LIVE target was modified.
