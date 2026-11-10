@@ -1610,3 +1610,54 @@ def test_workforce_policy_redacts_common_personal_identifiers():
     assert record["home_address"] == "[REDACTED_PERSONAL_DATA]"
     assert record["status"] == "active"
     assert result.redacted_fields == 4
+
+
+def test_maintenance_database_identity_guard_accepts_only_dedicated_loopback_role():
+    from app.workers.maintenance import validate_maintenance_database_identity
+
+    validate_maintenance_database_identity({
+        "database_name": "sireader_disposable",
+        "role_name": "sireader_workforce_maint",
+        "server_host": "127.0.0.1",
+        "server_port": 5432,
+        "is_superuser": False,
+        "can_create_db": False,
+        "can_create_role": False,
+        "can_replicate": False,
+        "bypasses_rls": False,
+        "inherits_roles": False,
+    })
+
+
+@pytest.mark.parametrize("field,value", [
+    ("database_name", "postgres"),
+    ("database_name", "sireader_test"),
+    ("role_name", "sireader_dev"),
+    ("role_name", "sireader_workforce_cmd"),
+    ("server_host", "192.0.2.10"),
+    ("server_port", 5433),
+    ("is_superuser", True),
+    ("can_create_db", True),
+    ("can_create_role", True),
+    ("can_replicate", True),
+    ("bypasses_rls", True),
+    ("inherits_roles", True),
+])
+def test_maintenance_database_identity_guard_rejects_wrong_target_or_privileged_role(field, value):
+    from app.workers.maintenance import validate_maintenance_database_identity
+
+    identity = {
+        "database_name": "sireader_disposable",
+        "role_name": "sireader_workforce_maint",
+        "server_host": "127.0.0.1",
+        "server_port": 5432,
+        "is_superuser": False,
+        "can_create_db": False,
+        "can_create_role": False,
+        "can_replicate": False,
+        "bypasses_rls": False,
+        "inherits_roles": False,
+    }
+    identity[field] = value
+    with pytest.raises(RuntimeError, match="maintenance|non-privileged"):
+        validate_maintenance_database_identity(identity)

@@ -729,8 +729,10 @@ def purge_expired_task_payloads(
     ]
     try:
         from sqlalchemy import inspect
-        bind = db.get_bind()
-        table_exists = inspect(bind).has_table("workforce_task_reviews")
+        # Reuse the active transaction connection. Maintenance deliberately has
+        # a one-connection pool, so inspecting the Engine here would deadlock
+        # by attempting to check out a second connection from the same pool.
+        table_exists = inspect(db.connection()).has_table("workforce_task_reviews")
     except Exception as exc:
         logger.error("Failed to inspect workforce_task_reviews table for purge protection: %s", exc)
         raise WorkforceRepositoryError("Cannot purge task payloads: review subsystem inspection failed") from exc

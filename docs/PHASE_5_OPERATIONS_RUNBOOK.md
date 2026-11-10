@@ -190,3 +190,14 @@ A transaction-scoped local verification passed APPROVE (original payload release
 ### REJECT adjudication verification — 2026-11-10
 
 A transaction-scoped probe under `sireader_workforce_cmd` passed REJECT: the review transitions to REJECTED, task `result_payload` remains NULL (the quarantined output is not released), and `HUMAN_REVIEW_REJECTED` is appended. Synthetic task/review/payload/event rows were rolled back. Database-level APPROVE, EDIT and REJECT paths now all pass; authenticated browser acceptance remains a separate open gate.
+
+
+## Local disposable maintenance identity and scheduler — 2026-11-10
+
+- The maintenance job uses a separate SIREADER_WORKFORCE_MAINTENANCE_DATABASE_URL; it deliberately does not populate the application's general DATABASE_URL.
+- Local .env target: postgresql+psycopg://sireader_workforce_maint@127.0.0.1:5432/sireader_disposable. The local PostgreSQL 127.0.0.1 host rule currently uses trust; the dedicated login has no password and is not a superuser, cannot bypass RLS, cannot inherit roles, and is granted only the workforce maintenance tables/columns and activity INSERT/sequence USAGE.
+- Migration: migrations/2026_11_10_workforce_maintenance_role_v1.sql; rollback: migrations/2026_11_10_workforce_maintenance_role_v1_rollback.sql. Both refuse any database other than loopback sireader_disposable. RLS confines task, attempt, review and payload access to the explicit non-trading worker/capability/type allowlist. The role cannot read worker registry, heartbeats, command audit, or trading/Telegram tables; it has no DELETE privilege.
+- The Python maintenance entrypoint independently verifies the connected database, host, exact role name, and non-privileged role flags before opening a maintenance session. The runner selects the project .venv or the verified Python 3.12 environment at C:\SIREADER\.venv.
+- The Windows registration script validates the dedicated URL from .env and every Process/User/Machine override, rejects query/fragment and all libpq redirection overrides, and requires exactly sireader_workforce_maint on sireader_disposable. It registers SIREADER-WorkforceMaintenance every 5 minutes for the current interactive Windows user (/IT); the user must be logged in for the task to run.
+- First authorized local maintenance run: 4 stale PENDING reviews transitioned to EXPIRED and 4 expired task payloads were purged. No task lease recovery or deadline expiry occurred; no review payload was purged. A second run returned zero for every operation, confirming idempotency. Review metadata and audit events remain; pending reviews are not purged.
+- Never copy this local URL or role to Supabase LIVE or another database. If the local PostgreSQL authentication rules change from loopback trust, the scheduled task should fail closed until an explicit authenticated local credential is provisioned.

@@ -54,6 +54,11 @@ function Assert-LoopbackPostgresTarget([string]$Value, [string]$Source) {
         $HostName -notin @("localhost", "127.0.0.1", "::1")) {
         throw "DATABASE_URL from $Source is not loopback PostgreSQL. Remote, Supabase, and production targets are blocked."
     }
+    $UserName = [System.Uri]::UnescapeDataString(($Parsed.UserInfo -split ':', 2)[0])
+    $DatabaseName = $Parsed.AbsolutePath.Trim('/')
+    if ($UserName -ne "sireader_workforce_maint" -or $DatabaseName -ne "sireader_disposable") {
+        throw "DATABASE_URL from $Source must use sireader_workforce_maint on sireader_disposable."
+    }
 }
 
 # Refuse libpq overrides in every Windows environment scope. These variables
@@ -74,25 +79,27 @@ foreach ($Variable in $BlockedPgVariables) {
 # The core DB connection loads .env without overriding process variables.
 # Check .env and every Windows environment scope that may take precedence.
 $DatabaseCandidates = @()
+$MaintenanceUrlKey = "SIREADER_WORKFORCE_MAINTENANCE_DATABASE_URL"
+$EnvPattern = '^\s*(?:export\s+)?' + [regex]::Escape($MaintenanceUrlKey) + '\s*='
 $EnvMatch = Get-Content -LiteralPath $EnvFile |
-    Where-Object { $_ -match '^\s*(?:export\s+)?DATABASE_URL\s*=' } |
+    Where-Object { $_ -match $EnvPattern } |
     Select-Object -Last 1
 
 if ($null -ne $EnvMatch) {
-    $FileValue = $EnvMatch -replace '^\s*(?:export\s+)?DATABASE_URL\s*=\s*', ''
+    $FileValue = $EnvMatch -replace ('^\s*(?:export\s+)?' + [regex]::Escape($MaintenanceUrlKey) + '\s*=\s*'), ''
     $FileValue = $FileValue -replace '\s+#.*$', ''
     $DatabaseCandidates += @{ Value = $FileValue.Trim(); Source = ".env" }
 }
 
 foreach ($Scope in @("Process", "User", "Machine")) {
-    $ScopedValue = [Environment]::GetEnvironmentVariable("DATABASE_URL", $Scope)
+    $ScopedValue = [Environment]::GetEnvironmentVariable($MaintenanceUrlKey, $Scope)
     if (-not [string]::IsNullOrWhiteSpace($ScopedValue)) {
         $DatabaseCandidates += @{ Value = $ScopedValue; Source = "$Scope environment" }
     }
 }
 
 if ($DatabaseCandidates.Count -eq 0) {
-    throw "DATABASE_URL is not configured. Maintenance registration is blocked."
+    throw "$MaintenanceUrlKey is not configured. Maintenance registration is blocked."
 }
 
 foreach ($Candidate in $DatabaseCandidates) {

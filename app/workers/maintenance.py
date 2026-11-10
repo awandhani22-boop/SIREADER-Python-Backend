@@ -13,7 +13,7 @@ import os
 from datetime import datetime
 from typing import Any, Callable, Mapping
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
@@ -56,7 +56,7 @@ def validate_maintenance_database_url(
     """
     if not raw_url or not raw_url.strip():
         raise RuntimeError(
-            "DATABASE_URL is not configured; workforce maintenance is disabled."
+            "SIREADER_WORKFORCE_MAINTENANCE_DATABASE_URL is not configured; workforce maintenance is disabled."
         )
 
     environment = os.environ if environ is None else environ
@@ -105,6 +105,34 @@ def validate_maintenance_database_url(
         )
 
 
+def validate_maintenance_database_identity(identity: Mapping[str, Any]) -> None:
+    """Require the dedicated, non-privileged role on the exact local disposable DB."""
+    expected = {
+        "database_name": "sireader_disposable",
+        "role_name": "sireader_workforce_maint",
+        "server_host": "127.0.0.1",
+        "server_port": 5432,
+    }
+    for key, value in expected.items():
+        if identity.get(key) != value:
+            raise RuntimeError(
+                "Workforce maintenance requires the dedicated maintenance role "
+                "on loopback sireader_disposable."
+            )
+    forbidden_flags = (
+        "is_superuser",
+        "can_create_db",
+        "can_create_role",
+        "can_replicate",
+        "bypasses_rls",
+        "inherits_roles",
+    )
+    if any(bool(identity.get(flag)) for flag in forbidden_flags):
+        raise RuntimeError(
+            "Workforce maintenance role violates the non-privileged role contract."
+        )
+
+
 def _create_maintenance_session_factory(raw_url: str):
     """Create an isolated one-connection engine for the validated local target."""
     validate_maintenance_database_url(raw_url)
@@ -117,6 +145,27 @@ def _create_maintenance_session_factory(raw_url: str):
         pool_timeout=5,
         connect_args={"connect_timeout": 5},
     )
+    try:
+        with engine.connect() as connection:
+            identity = connection.execute(text("""
+                SELECT
+                    current_database() AS database_name,
+                    current_user AS role_name,
+                    host(inet_server_addr()) AS server_host,
+                    inet_server_port() AS server_port,
+                    r.rolsuper AS is_superuser,
+                    r.rolcreatedb AS can_create_db,
+                    r.rolcreaterole AS can_create_role,
+                    r.rolreplication AS can_replicate,
+                    r.rolbypassrls AS bypasses_rls,
+                    r.rolinherit AS inherits_roles
+                FROM pg_catalog.pg_roles r
+                WHERE r.rolname = current_user
+            """)).mappings().one()
+            validate_maintenance_database_identity(identity)
+    except Exception:
+        engine.dispose()
+        raise
     factory = sessionmaker(
         bind=engine,
         autoflush=False,
@@ -139,7 +188,7 @@ def run_maintenance_once(
         from dotenv import load_dotenv
 
         load_dotenv(encoding="utf-8-sig", override=False)
-        raw_url = os.getenv("DATABASE_URL")
+        raw_url = os.getenv("SIREADER_WORKFORCE_MAINTENANCE_DATABASE_URL")
         validate_maintenance_database_url(raw_url)
         assert raw_url is not None
         maintenance_engine, session_factory = _create_maintenance_session_factory(raw_url)
