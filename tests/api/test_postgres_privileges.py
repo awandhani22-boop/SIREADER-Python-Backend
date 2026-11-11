@@ -308,6 +308,17 @@ SEED_DML = [
             'lease-budget-fixture', 'COMPLETED', 'ci-budget-request', now(), now(), now())
     """,
     """
+    INSERT INTO public.workforce_task_reviews
+        (review_id, task_id, attempt_id, status, original_output_sha256, review_expires_at)
+    VALUES ('ci-review-read-view', 'budget-fixture-task', 'budget-fixture-attempt',
+            'PENDING', repeat('a', 64), now() + interval '1 day')
+    """,
+    """
+    INSERT INTO public.workforce_task_review_payloads
+        (review_id, original_output)
+    VALUES ('ci-review-read-view', '{"result":"synthetic review visibility fixture","source":"SIMULATED"}'::jsonb)
+    """,
+    """
     INSERT INTO public.ai_analysis_logs (chat_id, target_message_id, status, created_at)
     VALUES (123, 456, 'PROCESSING', now())
     """,
@@ -353,6 +364,7 @@ def postgres_security_engine():
         ):
             connection.exec_driver_sql(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
         connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_notify_workforce_v1() CASCADE")
+        connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_provider_slot_available_v1(integer) CASCADE")
         connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_guard_workforce_result_release_v1() CASCADE")
         connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_guard_review_payloads_v1() CASCADE")
         connection.exec_driver_sql("DROP FUNCTION IF EXISTS public.sireader_guard_review_metadata_v1() CASCADE")
@@ -383,6 +395,7 @@ def postgres_security_engine():
             "2026_11_09_workforce_runtime_v1.sql",
             "2026_11_09_workforce_api_views_v1.sql",
             "2026_11_09_workforce_commands_v1.sql",
+            "2026_11_11_workforce_global_provider_gate_v1.sql",
             "2026_11_09_workforce_timeline_v2.sql",
             "2026_11_10_workforce_reviews_v1.sql",
             "2026_11_10_workforce_review_creation_boundary_v3.sql",
@@ -398,6 +411,9 @@ def postgres_security_engine():
         for view_name in VIEW_NAMES:
             connection.exec_driver_sql(
                 f"ALTER VIEW public.{view_name} OWNER TO sireader_view_owner"
+            )
+            connection.exec_driver_sql(
+                f"ALTER VIEW public.{view_name} SET (security_barrier = true)"
             )
         connection.exec_driver_sql(
             """
@@ -416,6 +432,51 @@ def postgres_security_engine():
 
     yield engine
     engine.dispose()
+
+
+def test_global_provider_gate_role_boundary_and_unknown_quarantine(postgres_security_engine):
+    with postgres_security_engine.begin() as connection:
+        function_security = connection.execute(text("""
+            SELECT
+                pg_catalog.pg_get_userbyid(p.proowner),
+                p.prosecdef,
+                EXISTS (
+                    SELECT 1 FROM pg_catalog.aclexplode(p.proacl) acl
+                    WHERE acl.grantee = 'postgres'::regrole AND acl.privilege_type = 'EXECUTE'
+                  ),
+                pg_catalog.has_function_privilege('sireader_workforce_cmd', p.oid, 'EXECUTE'),
+                pg_catalog.has_function_privilege('sireader_api_ro', p.oid, 'EXECUTE'),
+                EXISTS (
+                    SELECT 1 FROM pg_catalog.aclexplode(p.proacl) acl
+                    WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+                )
+            FROM pg_catalog.pg_proc p
+            WHERE p.oid = 'public.sireader_provider_slot_available_v1(integer)'::regprocedure
+        """)).one()
+        assert function_security == ("sireader_view_owner", True, True, False, False, False)
+
+        connection.execute(text(
+            "UPDATE public.workforce_task_attempts SET status = 'UNKNOWN' WHERE attempt_id = 'budget-fixture-attempt'"
+        ))
+        assert connection.execute(text(
+            "SELECT public.sireader_provider_slot_available_v1(1)"
+        )).scalar_one() is False
+        connection.execute(text(
+            "UPDATE public.workforce_task_attempts SET status = 'COMPLETED' WHERE attempt_id = 'budget-fixture-attempt'"
+        ))
+        assert connection.execute(text(
+            "SELECT public.sireader_provider_slot_available_v1(1)"
+        )).scalar_one() is True
+
+    with postgres_security_engine.connect() as connection:
+        connection.exec_driver_sql("SET ROLE sireader_api_ro")
+        with pytest.raises(DBAPIError):
+            connection.execute(text("SELECT public.sireader_provider_slot_available_v1(1)"))
+
+    with postgres_security_engine.connect() as connection:
+        connection.exec_driver_sql("SET ROLE sireader_workforce_cmd")
+        with pytest.raises(DBAPIError):
+            connection.execute(text("SELECT public.sireader_provider_slot_available_v1(1)"))
 
 
 def test_postgres_effective_role_and_privilege_boundary(postgres_security_engine):
@@ -447,7 +508,7 @@ def test_postgres_effective_role_and_privilege_boundary(postgres_security_engine
                 "v_api_workforce_tasks": 1,  # One task backs the budget-view provider-request join fixture.
                 "v_api_workforce_attempts": 1,
                 "v_api_workforce_activity": 0,
-                "v_api_workforce_task_reviews": 0,
+                "v_api_workforce_task_reviews": 1,
                 "v_api_workforce_task_timeline": 0,
             }.get(view_name, 1)
             assert len(rows) == expected_rows, f"{view_name} returned an unexpected row count"
@@ -477,6 +538,8 @@ def test_postgres_effective_role_and_privilege_boundary(postgres_security_engine
         "workforce_tasks",
         "workforce_task_attempts",
         "workforce_activity_events",
+        "workforce_task_reviews",
+        "workforce_task_review_payloads",
     ],
 )
 def test_postgres_api_role_cannot_select_any_base_table(postgres_security_engine, table_name):

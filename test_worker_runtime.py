@@ -32,8 +32,15 @@ def test_worker_runtime_rejects_unsafe_poll_intervals(monkeypatch):
 
 def test_worker_publishes_active_and_provider_in_flight_heartbeats_without_waiting(monkeypatch):
     monkeypatch.setattr(settings, "WORKER_RUNTIME_ENABLED", True)
-    monkeypatch.setattr(settings, "WORKER_PROVIDER_MODE", "OMNIROUTE")
-    monkeypatch.setattr(runtime, "_last_maintenance_at", datetime.now(timezone.utc))
+    monkeypatch.setattr(settings, "WORKER_PROVIDER_MODE", "ANTHROPIC")
+    monkeypatch.setattr(settings, "WORKER_LIVE_PROVIDER_ENABLED", True)
+    # The database session is fully mocked; provide the dedicated synthetic role
+    # required by the live-worker DB guard without opening a real connection.
+    monkeypatch.setattr(
+        settings,
+        "WORKER_DATABASE_URL",
+        "postgresql+psycopg://sireader_worker_haiku:test@127.0.0.1:55442/sireader_test",
+    )
 
     heartbeats = []
     events = []

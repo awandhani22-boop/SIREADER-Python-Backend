@@ -12,7 +12,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app.workers.repository import (
     cancel_task, claim_next_task, complete_task, enqueue_task, expire_deadline_tasks,
-    heartbeat_worker, mark_provider_requested, recover_expired_leases,
+    heartbeat_worker, mark_provider_requested,
+    recover_expired_leases,
     start_task, sync_default_registry, purge_expired_task_payloads,
     expire_stale_reviews, purge_expired_review_payloads,
 )
@@ -24,7 +25,7 @@ from app.workers.models import (
     WorkActivityEventRecord, WorkTaskAttemptRecord, WorkTaskRecord,
     WorkforceTaskReviewPayloadRecord, WorkforceTaskReviewRecord,
 )
-from app.workers.repository import WorkerUnavailableError
+from app.workers.repository import GlobalProviderConcurrencyLimitError, WorkerUnavailableError
 
 POSTGRES_URL = os.getenv("SIREADER_TEST_POSTGRES_URL")
 PSYCOPG_URL = (
@@ -59,6 +60,8 @@ def test_workforce_migration_security_and_task_lifecycle():
     review_creation_v3_rollback_name = "2026_11_10_workforce_review_creation_boundary_v3_rollback.sql"
     budget_migration_name = "2026_11_10_workforce_budget_observability_v1.sql"
     budget_rollback_name = "2026_11_10_workforce_budget_observability_v1_rollback.sql"
+    provider_gate_migration_name = "2026_11_11_workforce_global_provider_gate_v1.sql"
+    provider_gate_rollback_name = "2026_11_11_workforce_global_provider_gate_v1_rollback.sql"
 
     with psycopg.connect(PSYCOPG_URL, autocommit=True) as admin:
         roles = {row[0] for row in admin.execute("SELECT rolname FROM pg_roles WHERE rolname IN ('sireader_view_owner', 'sireader_api_ro', 'sireader_workforce_cmd')")}
@@ -95,6 +98,32 @@ def test_workforce_migration_security_and_task_lifecycle():
             _run_migration(admin, root, views_migration_name)  # idempotent view replacement
             _run_migration(admin, root, command_migration_name)
             _run_migration(admin, root, command_migration_name)  # idempotent command boundary
+            _run_migration(admin, root, provider_gate_migration_name)
+            _run_migration(admin, root, provider_gate_migration_name)  # idempotent global provider gate
+            gate_grants = admin.execute(
+                """
+                SELECT
+                  pg_catalog.pg_get_userbyid(p.proowner), p.prosecdef,
+                  EXISTS (
+                    SELECT 1 FROM pg_catalog.aclexplode(p.proacl) acl
+                    WHERE acl.grantee = 'postgres'::regrole AND acl.privilege_type = 'EXECUTE'
+                  ),
+                  pg_catalog.has_function_privilege('sireader_workforce_cmd', p.oid, 'EXECUTE'),
+                  pg_catalog.has_function_privilege('sireader_api_ro', p.oid, 'EXECUTE'),
+                  EXISTS (
+                    SELECT 1 FROM pg_catalog.aclexplode(p.proacl) acl
+                    WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+                  )
+                FROM pg_catalog.pg_proc p
+                WHERE p.oid = 'public.sireader_provider_slot_available_v1(integer)'::regprocedure
+                """
+            ).fetchone()
+            assert gate_grants == ("sireader_view_owner", True, True, False, False, False)
+            _run_migration(admin, root, provider_gate_rollback_name)
+            assert admin.execute(
+                "SELECT pg_catalog.to_regprocedure('public.sireader_provider_slot_available_v1(integer)') IS NULL"
+            ).fetchone()[0] is True
+            _run_migration(admin, root, provider_gate_migration_name)
             _run_migration(admin, root, timeline_migration_name)
             _run_migration(admin, root, timeline_migration_name)  # idempotent timeline boundary
             _run_migration(admin, root, review_migration_name)
@@ -220,6 +249,12 @@ def test_workforce_migration_security_and_task_lifecycle():
                         heartbeat_at=reset_at, active_task_count=0,
                         in_flight_provider_requests=0, observed_at=reset_at,
                     ))
+                    heartbeat_worker(db, WorkerHeartbeatContract(
+                        worker_id="sonnet", instance_id="instance-sonnet-123",
+                        process_state=WorkerProcessState.READY, process_started_at=now,
+                        heartbeat_at=reset_at, active_task_count=0,
+                        in_flight_provider_requests=0, observed_at=reset_at,
+                    ))
 
             task_ids = []
             with Session() as db:
@@ -262,31 +297,70 @@ def test_workforce_migration_security_and_task_lifecycle():
                     )
                     assert deadline_created
                     task_ids.append(deadline_row.task_id)
+                    sonnet_row, sonnet_created = enqueue_task(
+                        db, task_type="COMPARISON", title="Compare synthetic alternatives",
+                        required_capability="comparison", input_payload={"left": {"score": 1}, "right": {"score": 2}},
+                        idempotency_key="phase74-sonnet-comparison-005", priority=55, now=now,
+                    )
+                    assert sonnet_created
+                    task_ids.append(sonnet_row.task_id)
 
-            def claim_one(_index):
+            worker_specs = (
+                ("haiku", "instance-haiku-123"),
+                ("sonnet", "instance-sonnet-123"),
+            )
+
+            def claim_one(spec):
+                worker_id, instance_id = spec
                 with Session() as db:
                     with db.begin():
                         claimed = claim_next_task(
-                            db, worker_id="haiku", instance_id="instance-haiku-123",
+                            db, worker_id=worker_id, instance_id=instance_id,
                             lease_seconds=45, now=now,
                         )
-                        return None if claimed is None else (claimed[0].task_id, claimed[1].attempt_id, claimed[1].lease_token)
+                        return None if claimed is None else (
+                            claimed[0].task_id, claimed[1].attempt_id,
+                            claimed[1].lease_token, worker_id, instance_id,
+                        )
 
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                claimed = list(pool.map(claim_one, range(3)))
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                claimed = list(pool.map(claim_one, worker_specs))
             active = [value for value in claimed if value is not None]
-            assert len(active) == 2  # Haiku concurrency limit is two, even under parallel claims.
+            assert len(active) == 2  # One Haiku and one Sonnet process claim across distinct workers.
+            assert {item[3] for item in active} == {"haiku", "sonnet"}
             assert len({item[0] for item in active}) == 2
 
-            # After a provider request, cancellation is an uncertain outcome and cannot be retried.
-            provider_task_id, provider_attempt_id, provider_lease = active[0]
-            with Session() as db:
-                with db.begin():
-                    start_task(db, task_id=provider_task_id, lease_token=provider_lease, now=now + timedelta(seconds=1))
-                    mark_provider_requested(db, task_id=provider_task_id, lease_token=provider_lease, now=now + timedelta(seconds=2))
+            # Two simultaneous attempts race for one global provider slot.
+            # The advisory transaction lock must allow exactly one reservation,
+            # even when separate worker processes arrive at the same time.
+            for task_id, _attempt_id, lease_token, _worker_id, _instance_id in active:
+                with Session() as db:
+                    with db.begin():
+                        start_task(db, task_id=task_id, lease_token=lease_token, now=now + timedelta(seconds=1))
+
+            def reserve_global_slot(item):
+                task_id, attempt_id, lease_token = item[:3]
+                try:
+                    with Session() as db:
+                        with db.begin():
+                            mark_provider_requested(
+                                db, task_id=task_id, lease_token=lease_token,
+                                provider_request_id=attempt_id, now=now + timedelta(seconds=2),
+                            )
+                    return task_id
+                except GlobalProviderConcurrencyLimitError:
+                    return None
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                reservation_results = list(pool.map(reserve_global_slot, active))
+            acquired = [active[index] for index, task_id in enumerate(reservation_results) if task_id is not None]
+            blocked = [active[index] for index, task_id in enumerate(reservation_results) if task_id is None]
+            assert len(acquired) == 1
+            assert len(blocked) == 1
+            provider_task_id, provider_attempt_id, provider_lease, provider_worker_id, _provider_instance_id = acquired[0]
+            pre_task_id, pre_attempt_id, pre_lease, pre_worker_id, pre_instance_id = blocked[0]
 
             # Both leases expire; only the pre-provider task is safe to retry.
-            pre_task_id, pre_attempt_id, pre_lease = active[1]
             recovery_time = now + timedelta(minutes=2)
             with Session() as db:
                 with db.begin():
@@ -309,14 +383,14 @@ def test_workforce_migration_security_and_task_lifecycle():
             with Session() as db:
                 with db.begin():
                     heartbeat_worker(db, WorkerHeartbeatContract(
-                        worker_id="haiku", instance_id="instance-haiku-123",
+                        worker_id=pre_worker_id, instance_id=pre_instance_id,
                         process_state=WorkerProcessState.READY, process_started_at=now,
                         heartbeat_at=recovery_time + timedelta(minutes=1),
                         active_task_count=0, in_flight_provider_requests=0,
                         observed_at=recovery_time + timedelta(minutes=1),
                     ))
                     retry = claim_next_task(
-                        db, worker_id="haiku", instance_id="instance-haiku-123",
+                        db, worker_id=pre_worker_id, instance_id=pre_instance_id,
                         now=recovery_time + timedelta(minutes=1),
                     )
                     assert retry is not None and retry[0].task_id == pre_task_id
@@ -395,7 +469,12 @@ def test_workforce_migration_security_and_task_lifecycle():
                 assert human_review_payload.original_output is None
                 assert deadline.payload_purged_at is not None
                 assert cancelled.payload_purged_at is not None
-                assert review.input_payload == {"text": "safe test"}
+                expected_provider_input = (
+                    {"text": "safe test"}
+                    if provider_worker_id == "haiku"
+                    else {"left": {"score": 1}, "right": {"score": 2}}
+                )
+                assert review.input_payload == expected_provider_input
                 assert review.payload_purged_at is None
 
             with Session() as db:

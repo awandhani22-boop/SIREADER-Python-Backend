@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from json import dumps
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -49,6 +49,13 @@ class LeaseConflictError(WorkforceRepositoryError):
 
 class WorkerUnavailableError(WorkforceRepositoryError):
     pass
+
+
+class GlobalProviderConcurrencyLimitError(WorkforceRepositoryError):
+    code = "GLOBAL_PROVIDER_CONCURRENCY_LIMIT"
+
+
+GLOBAL_PROVIDER_REQUEST_LIMIT = 1
 
 
 def _now(value: datetime | None = None) -> datetime:
@@ -325,6 +332,9 @@ def claim_next_task(db: Session, *, worker_id: str, instance_id: str,
         created_at=stamp,
     )
     db.add(attempt)
+    # The database audit ledger has an FK to the new attempt row. Flush it first
+    # so TASK_CLAIMED cannot be inserted before its referenced attempt.
+    db.flush()
     _append_event(
         db, event_type=ActivityEventType.TASK_CLAIMED, correlation_id=task.correlation_id,
         worker_id=worker_id, task_id=task.task_id, attempt_id=attempt.attempt_id,
@@ -360,6 +370,25 @@ def start_task(db: Session, *, task_id: str, lease_token: str, now: datetime | N
     return task
 
 
+def _acquire_global_provider_slot(db: Session) -> None:
+    """Check the global LIVE provider slot under a PostgreSQL transaction lock.
+
+    Called only by mark_provider_requested; the same transaction then persists
+    the durable slot record. UNKNOWN remains occupied until explicit reconciliation.
+    """
+    bind = db.get_bind()
+    if bind.dialect.name != "postgresql":
+        raise WorkforceRepositoryError("global provider gate requires PostgreSQL")
+    available = db.execute(
+        text("SELECT public.sireader_provider_slot_available_v1(:limit)"),
+        {"limit": GLOBAL_PROVIDER_REQUEST_LIMIT},
+    ).scalar_one()
+    if available is not True:
+        raise GlobalProviderConcurrencyLimitError(
+            "The single global LIVE provider slot is occupied or quarantined."
+        )
+
+
 def mark_provider_requested(db: Session, *, task_id: str, lease_token: str, provider_request_id: str | None = None, now: datetime | None = None) -> WorkTaskAttemptRecord:
     task, attempt = _locked_task_attempt(db, task_id, lease_token, now)
     if task.status != TaskStatus.RUNNING.value or attempt.status != AttemptStatus.STARTED.value:
@@ -368,6 +397,9 @@ def mark_provider_requested(db: Session, *, task_id: str, lease_token: str, prov
     stable_provider_request_id = provider_request_id or attempt.attempt_id
     if not isinstance(stable_provider_request_id, str) or not stable_provider_request_id or len(stable_provider_request_id) > 64:
         raise ValueError("provider_request_id must contain 1..64 characters")
+    # Enforce the global slot here, not only in the current runtime callback,
+    # so every repository caller is subject to the same cross-worker gate.
+    _acquire_global_provider_slot(db)
     attempt.status = AttemptStatus.PROVIDER_REQUESTED.value
     attempt.provider_request_id = stable_provider_request_id
     attempt.provider_started_at = stamp

@@ -9,25 +9,32 @@ from uuid import uuid4
 
 from app.config import settings
 from app.workers.policy import SensitiveTaskAction, evaluate_workforce_policy
-from app.database.connection import SessionLocal
-from app.workers.models import WorkerDefinitionRecord, WorkerCapabilityAssignmentRecord
-from app.workers.provider import (
-    OmniRouteWorkerProvider, WorkerExecutionRequest, WorkerProviderError,
-    create_worker_provider,
+from app.workers.database import (
+    WorkerDatabaseConfigurationError,
+    WorkerSessionLocal as SessionLocal,
+    validate_worker_database_configuration,
 )
-from app.workers.repository import (
+from app.workers.provider import (
+    AnthropicWorkerProvider, OmniRouteWorkerProvider,
+    WorkerExecutionRequest, WorkerProviderError, create_worker_provider,
+)
+from app.workers.database_commands import (
     claim_next_task, complete_task, fail_task, heartbeat_worker,
-    mark_provider_requested, recover_expired_leases, renew_task_lease,
-    start_task, expire_deadline_tasks, purge_expired_task_payloads,
-    expire_stale_reviews, purge_expired_review_payloads,
+    mark_provider_requested, renew_task_lease, start_task, worker_get_contract,
 )
 from app.workers.runtime_contract import WorkerContract, WorkerHeartbeatContract, WorkerProcessState
 
 logger = logging.getLogger(__name__)
-MAINTENANCE_INTERVAL_SECONDS = 15
 HEARTBEAT_INTERVAL_SECONDS = 15
-_last_maintenance_at: datetime | None = None
 MIN_LEASE_SECONDS = 5
+
+
+def _require_worker_database_configuration() -> None:
+    """Fail before heartbeat/claim when a live worker lacks its dedicated DB identity."""
+    try:
+        validate_worker_database_configuration()
+    except WorkerDatabaseConfigurationError as exc:
+        raise WorkerProviderError(exc.code, str(exc)) from exc
 
 
 def _utc_now() -> datetime:
@@ -35,24 +42,7 @@ def _utc_now() -> datetime:
 
 
 def _load_worker_contract(db, worker_id: str) -> WorkerContract:
-    row = db.get(WorkerDefinitionRecord, worker_id)
-    if row is None:
-        raise WorkerProviderError("WORKER_NOT_REGISTERED", "Worker is not registered.")
-    capability_ids = db.query(WorkerCapabilityAssignmentRecord.capability_id).filter(
-        WorkerCapabilityAssignmentRecord.worker_id == worker_id,
-        WorkerCapabilityAssignmentRecord.enabled.is_(True),
-    ).order_by(WorkerCapabilityAssignmentRecord.capability_id.asc()).all()
-    return WorkerContract(
-        worker_id=row.worker_id,
-        display_name=row.display_name,
-        role=row.role,
-        department=row.department,
-        capability_ids=[item[0] for item in capability_ids],
-        enabled=row.enabled,
-        max_concurrency=row.max_concurrency,
-        model_tier=row.model_tier,
-        schema_version=row.schema_version,
-    )
+    return worker_get_contract(db, worker_id=worker_id)
 
 
 def _heartbeat_contract(
@@ -141,6 +131,7 @@ class _LeaseKeeper:
                         ))
                         renew_task_lease(
                             db, task_id=self.task_id, lease_token=self.lease_token,
+                            worker_id=self.worker_id, instance_id=self.instance_id,
                             lease_seconds=self.lease_seconds, now=now,
                         )
             except Exception as exc:
@@ -160,25 +151,17 @@ def run_worker_once(
     """Claim and execute at most one task. Returns False when the queue is idle."""
     if not settings.WORKER_RUNTIME_ENABLED:
         raise WorkerProviderError("WORKER_RUNTIME_DISABLED", "Set WORKER_RUNTIME_ENABLED=true to start workers.")
+    _require_worker_database_configuration()
 
-    global _last_maintenance_at
     now = _utc_now()
     _record_heartbeat(
         worker_id, instance_id, process_started_at, WorkerProcessState.READY,
     )
-    run_maintenance = (
-        _last_maintenance_at is None
-        or (now - _last_maintenance_at).total_seconds() >= MAINTENANCE_INTERVAL_SECONDS
-    )
+    # Runtime identity is intentionally limited to normal worker operations.
+    # Lease recovery, deadline/review expiry, and retention purges are executed
+    # only by the separately authenticated maintenance command/identity.
     with SessionLocal() as db:
         with db.begin():
-            if run_maintenance:
-                recover_expired_leases(db, now=now)
-                expire_deadline_tasks(db, now=now)
-                expire_stale_reviews(db, now=now)
-                purge_expired_task_payloads(db, now=now)
-                purge_expired_review_payloads(db, now=now)
-                _last_maintenance_at = now
             claimed = claim_next_task(
                 db, worker_id=worker_id, instance_id=instance_id,
                 lease_seconds=max(MIN_LEASE_SECONDS, int(settings.WORKER_TASK_LEASE_SECONDS)),
@@ -206,12 +189,13 @@ def run_worker_once(
             title=title,
             input_payload=input_payload,
             provider_mode=settings.WORKER_PROVIDER_MODE,
+            live_provider_enabled=settings.WORKER_LIVE_PROVIDER_ENABLED,
         )
         if policy.action is SensitiveTaskAction.REJECT:
             with SessionLocal() as db:
                 with db.begin():
                     fail_task(
-                        db, task_id=task_id, lease_token=lease_token,
+                        db, task_id=task_id, lease_token=lease_token, worker_id=worker_id, instance_id=instance_id,
                         error_code=policy.reason_code,
                         retryable=False, outcome_unknown=False,
                     )
@@ -225,7 +209,7 @@ def run_worker_once(
         with SessionLocal() as db:
             with db.begin():
                 fail_task(
-                    db, task_id=task_id, lease_token=lease_token,
+                    db, task_id=task_id, lease_token=lease_token, worker_id=worker_id, instance_id=instance_id,
                     error_code=getattr(exc, "code", "PROVIDER_CONFIGURATION_FAILED"),
                     retryable=False, outcome_unknown=False,
                 )
@@ -238,7 +222,7 @@ def run_worker_once(
     task_started_at = _utc_now()
     with SessionLocal() as db:
         with db.begin():
-            start_task(db, task_id=task_id, lease_token=lease_token, now=task_started_at)
+            start_task(db, task_id=task_id, lease_token=lease_token, worker_id=worker_id, instance_id=instance_id, now=task_started_at)
             heartbeat_worker(db, _heartbeat_contract(
                 worker_id,
                 instance_id,
@@ -257,7 +241,7 @@ def run_worker_once(
         with SessionLocal() as db:
             with db.begin():
                 fail_task(
-                    db, task_id=task_id, lease_token=lease_token,
+                    db, task_id=task_id, lease_token=lease_token, worker_id=worker_id, instance_id=instance_id,
                     error_code="LEASE_CONFIGURATION_INVALID",
                     retryable=False, outcome_unknown=False,
                 )
@@ -267,8 +251,11 @@ def run_worker_once(
         reserved_at = _utc_now()
         with SessionLocal() as db:
             with db.begin():
+                # mark_provider_requested enforces the global PostgreSQL gate
+                # and persists the occupied slot in this same transaction.
                 mark_provider_requested(
                     db, task_id=task_id, lease_token=lease_token,
+                    worker_id=worker_id, instance_id=instance_id,
                     provider_request_id=_provider_request_id, now=reserved_at,
                 )
                 heartbeat_worker(db, _heartbeat_contract(
@@ -300,7 +287,7 @@ def run_worker_once(
             worker_id, instance_id, process_started_at,
             task_id, lease_token, lease_seconds,
         ) as lease_keeper:
-            if isinstance(provider, OmniRouteWorkerProvider):
+            if getattr(provider, "requires_provider_request_tracking", False):
                 original_request = request
 
                 def tracked_callback(provider_request_id: str) -> None:
@@ -326,12 +313,13 @@ def run_worker_once(
                 raise WorkerProviderError(
                     "LEASE_RENEWAL_UNCERTAIN",
                     "Lease renewal failed during execution; result requires reconciliation.",
-                    outcome_unknown=isinstance(provider, OmniRouteWorkerProvider),
+                    outcome_unknown=getattr(provider, "requires_provider_request_tracking", False),
                 )
         with SessionLocal() as db:
             with db.begin():
                 complete_task(
                     db, task_id=task_id, lease_token=lease_token,
+                    worker_id=worker_id, instance_id=instance_id,
                     result_payload={**result.result_payload, "source": result.source},
                     billing_currency=result.billing_currency,
                     cost_amount=result.cost_amount,
@@ -351,7 +339,7 @@ def run_worker_once(
         with SessionLocal() as db:
             with db.begin():
                 fail_task(
-                    db, task_id=task_id, lease_token=lease_token,
+                    db, task_id=task_id, lease_token=lease_token, worker_id=worker_id, instance_id=instance_id,
                     error_code=exc.code, retryable=exc.retryable,
                     outcome_unknown=exc.outcome_unknown, now=_utc_now(),
                 )
@@ -360,10 +348,10 @@ def run_worker_once(
         with SessionLocal() as db:
             with db.begin():
                 fail_task(
-                    db, task_id=task_id, lease_token=lease_token,
+                    db, task_id=task_id, lease_token=lease_token, worker_id=worker_id, instance_id=instance_id,
                     error_code="WORKER_UNEXPECTED_FAILURE",
                     retryable=False,
-                    outcome_unknown=isinstance(provider, OmniRouteWorkerProvider),
+                    outcome_unknown=getattr(provider, "requires_provider_request_tracking", False),
                     now=_utc_now(),
                 )
         logger.error(
@@ -388,6 +376,7 @@ def run_worker_forever(worker_id: str, *, poll_interval_seconds: float = 1.0) ->
         raise WorkerProviderError("WORKER_RUNTIME_DISABLED", "Worker runtime is disabled by configuration.")
     if not 0.1 <= poll_interval_seconds <= 30:
         raise ValueError("poll_interval_seconds must be between 0.1 and 30 seconds")
+    _require_worker_database_configuration()
     instance_id = uuid4().hex
     process_started_at = _utc_now()
     _record_heartbeat(worker_id, instance_id, process_started_at, WorkerProcessState.STARTING)
