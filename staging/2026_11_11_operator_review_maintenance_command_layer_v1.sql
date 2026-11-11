@@ -1050,6 +1050,10 @@ REVOKE ALL ON FUNCTION sireader_workforce_private.maintenance_run_once_v1(intege
 -- Internal function owner receives only the additional writes needed by operator/review/maintenance functions.
 GRANT INSERT ON public.workforce_tasks TO sireader_workforce_fn_owner;
 GRANT UPDATE ON public.workforce_task_reviews, public.workforce_task_review_payloads TO sireader_workforce_fn_owner;
+-- The worker function owner owns this private schema's functions/tables.
+-- Use its temporary SET membership for all remaining ACL changes.
+SET ROLE sireader_workforce_fn_owner;
+
 -- Grant only narrow command/read/review/maintenance EXECUTE surfaces.
 GRANT EXECUTE ON FUNCTION sireader_workforce_private.command_enqueue_task_v1(text,text,text,text,jsonb,integer,integer,text),
     sireader_workforce_private.command_cancel_task_v1(text,text),
@@ -1070,5 +1074,28 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA sireader_workforce_private FROM
     sireader_worker_supervisor,sireader_worker_haiku,sireader_worker_sonnet,sireader_worker_opus,
     sireader_worker_decision_engineer,sireader_worker_market_monitor,sireader_worker_data_archivist,
     sireader_workforce_cmd,sireader_workforce_review,sireader_workforce_maint;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA sireader_workforce_private FROM PUBLIC;
+
+RESET ROLE;
+
+REVOKE CREATE ON SCHEMA sireader_workforce_private FROM sireader_workforce_fn_owner;
+REVOKE sireader_workforce_fn_owner FROM postgres;
+
+DO $owner_audit$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_auth_members m
+        WHERE m.member='postgres'::regrole
+          AND m.roleid='sireader_workforce_fn_owner'::regrole
+          AND (m.set_option OR m.inherit_option)
+    )
+       OR pg_catalog.has_schema_privilege('sireader_workforce_fn_owner',
+           'sireader_workforce_private','CREATE')
+       OR NOT pg_catalog.has_schema_privilege('sireader_workforce_fn_owner',
+           'sireader_workforce_private','USAGE') THEN
+        RAISE EXCEPTION 'Function owner retained temporary SET/INHERIT/schema CREATE privileges';
+    END IF;
+END;
+$owner_audit$;
 
 COMMIT;

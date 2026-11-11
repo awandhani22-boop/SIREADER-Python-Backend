@@ -72,8 +72,11 @@ BEGIN
 END;
 $roles$;
 
-CREATE SCHEMA IF NOT EXISTS sireader_workforce_private AUTHORIZATION sireader_workforce_fn_owner;
+GRANT sireader_workforce_fn_owner TO postgres WITH SET TRUE, INHERIT FALSE;
+
+CREATE SCHEMA IF NOT EXISTS sireader_workforce_private AUTHORIZATION postgres;
 REVOKE ALL ON SCHEMA sireader_workforce_private FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA sireader_workforce_private TO sireader_workforce_fn_owner;
 GRANT USAGE ON SCHEMA sireader_workforce_private TO
     sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
     sireader_worker_opus, sireader_worker_decision_engineer,
@@ -88,6 +91,8 @@ CREATE TABLE IF NOT EXISTS sireader_workforce_private.worker_principals (
 );
 ALTER TABLE sireader_workforce_private.worker_principals OWNER TO sireader_workforce_fn_owner;
 REVOKE ALL ON sireader_workforce_private.worker_principals FROM PUBLIC;
+
+SET ROLE sireader_workforce_fn_owner;
 
 INSERT INTO sireader_workforce_private.worker_principals(database_role, worker_id)
 VALUES
@@ -162,6 +167,8 @@ SET policy_version = EXCLUDED.policy_version,
     sample_rate_percent = EXCLUDED.sample_rate_percent,
     sample_salt = EXCLUDED.sample_salt;
 
+RESET ROLE;
+
 -- Internal function owner gets only the workforce tables required by worker commands.
 GRANT USAGE ON SCHEMA public TO sireader_workforce_fn_owner;
 GRANT USAGE ON SCHEMA extensions TO sireader_workforce_fn_owner;
@@ -207,19 +214,40 @@ BEGIN
 END;
 $policies$;
 
--- Worker logins receive no base-table privileges, no schema CREATE, and no memberships.
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM
-    sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
+-- Worker logins receive no workforce base-table privileges, public-schema CREATE,
+-- or workforce sequence grants. Do not touch pre-existing API views owned by
+-- sireader_view_owner: these newly-created roles were never granted view access.
+REVOKE ALL ON TABLE
+    public.workforce_workers,
+    public.workforce_capabilities,
+    public.workforce_worker_capabilities,
+    public.workforce_heartbeats,
+    public.workforce_tasks,
+    public.workforce_task_attempts,
+    public.workforce_activity_events,
+    public.workforce_task_reviews,
+    public.workforce_task_review_payloads
+FROM sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
     sireader_worker_opus, sireader_worker_decision_engineer,
     sireader_worker_market_monitor, sireader_worker_data_archivist;
 REVOKE ALL ON SCHEMA public FROM
     sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
     sireader_worker_opus, sireader_worker_decision_engineer,
     sireader_worker_market_monitor, sireader_worker_data_archivist;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM
-    sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
-    sireader_worker_opus, sireader_worker_decision_engineer,
-    sireader_worker_market_monitor, sireader_worker_data_archivist;
+
+DO $worker_sequence_revoke$
+DECLARE v_sequence text;
+BEGIN
+    v_sequence := pg_catalog.pg_get_serial_sequence('public.workforce_activity_events','event_seq');
+    IF v_sequence IS NULL THEN
+        RAISE EXCEPTION 'workforce activity event identity sequence not found for worker ACL cleanup';
+    END IF;
+    EXECUTE pg_catalog.format(
+        'REVOKE ALL ON SEQUENCE %s FROM sireader_worker_supervisor,sireader_worker_haiku,sireader_worker_sonnet,sireader_worker_opus,sireader_worker_decision_engineer,sireader_worker_market_monitor,sireader_worker_data_archivist',
+        v_sequence
+    );
+END;
+$worker_sequence_revoke$;
 
 CREATE OR REPLACE FUNCTION sireader_workforce_private.worker_identity_v1(p_worker_id text)
 RETURNS text
@@ -1415,6 +1443,9 @@ BEGIN
 END;
 $audit$;
 
+-- Keep the temporary migration-operator membership and schema CREATE grant until
+-- the immediately following operator/review/maintenance staging layer has transferred
+-- its additional function/table ownership and granted its narrow EXECUTE surfaces.
 COMMIT;
 
 -- IMPORTANT: this staging layer replaces neither command API nor maintenance.

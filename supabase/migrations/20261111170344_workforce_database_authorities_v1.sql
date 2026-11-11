@@ -1,12 +1,11 @@
 -- SIREADER workforce authority production migration v1.
--- Creates LOGIN roles with NO password; provision/rotate their secrets out-of-band only after approval.
--- Do not apply to Supabase LIVE until backup/restore and change-window approval are documented.
+-- Creates LOGIN roles with NO password; provision/rotate secrets through a separate approved secret process.
+-- This migration is intended for the hosted target only after the managed-staging rehearsal and release gate pass.
 BEGIN;
 
--- SIREADER Worker Database Command Layer v1 — STAGING REHEARSAL ONLY.
--- Hard-pinned to the isolated local PG17 restore. This file is NOT a Supabase migration.
--- It creates seven NOLOGIN worker principals for identity/ACL tests; production
--- LOGIN/password provisioning is deliberately out-of-band and not included.
+-- Phase 7.4 worker DB command authority layer.
+-- Creates seven dedicated worker LOGIN identities without passwords.
+-- Provision/rotate credentials through a separate approved secret-management process.
 
 DO $guard$
 DECLARE v_tables integer; v_views integer;
@@ -108,8 +107,16 @@ BEGIN
 END;
 $role_config$;
 
-CREATE SCHEMA IF NOT EXISTS sireader_workforce_private AUTHORIZATION sireader_workforce_fn_owner;
+-- Supabase's managed postgres role is CREATEROLE but not a superuser.
+-- Grant it temporary SET membership so it can transfer internal objects to
+-- the NOLOGIN function owner; the membership is revoked before COMMIT.
+GRANT sireader_workforce_fn_owner TO postgres WITH SET TRUE, INHERIT FALSE;
+
+-- Keep schema ownership with the migration operator. The NOLOGIN function owner
+-- receives CREATE only while objects are being transferred to it.
+CREATE SCHEMA IF NOT EXISTS sireader_workforce_private AUTHORIZATION postgres;
 REVOKE ALL ON SCHEMA sireader_workforce_private FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA sireader_workforce_private TO sireader_workforce_fn_owner;
 GRANT USAGE ON SCHEMA sireader_workforce_private TO
     sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
     sireader_worker_opus, sireader_worker_decision_engineer,
@@ -123,6 +130,9 @@ CREATE TABLE IF NOT EXISTS sireader_workforce_private.worker_principals (
     created_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
 ALTER TABLE sireader_workforce_private.worker_principals OWNER TO sireader_workforce_fn_owner;
+
+-- Seed and revoke grants as the NOLOGIN owner, not as the migration operator.
+SET ROLE sireader_workforce_fn_owner;
 REVOKE ALL ON sireader_workforce_private.worker_principals FROM PUBLIC;
 
 INSERT INTO sireader_workforce_private.worker_principals(database_role, worker_id)
@@ -198,6 +208,8 @@ SET policy_version = EXCLUDED.policy_version,
     sample_rate_percent = EXCLUDED.sample_rate_percent,
     sample_salt = EXCLUDED.sample_salt;
 
+RESET ROLE;
+
 -- Internal function owner gets only the workforce tables required by worker commands.
 GRANT USAGE ON SCHEMA public TO sireader_workforce_fn_owner;
 GRANT USAGE ON SCHEMA extensions TO sireader_workforce_fn_owner;
@@ -243,19 +255,40 @@ BEGIN
 END;
 $policies$;
 
--- Worker logins receive no base-table privileges, no schema CREATE, and no memberships.
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM
-    sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
+-- Worker logins receive no workforce base-table privileges, public-schema CREATE,
+-- or workforce sequence grants. Do not touch pre-existing API views owned by
+-- sireader_view_owner: these newly-created roles were never granted view access.
+REVOKE ALL ON TABLE
+    public.workforce_workers,
+    public.workforce_capabilities,
+    public.workforce_worker_capabilities,
+    public.workforce_heartbeats,
+    public.workforce_tasks,
+    public.workforce_task_attempts,
+    public.workforce_activity_events,
+    public.workforce_task_reviews,
+    public.workforce_task_review_payloads
+FROM sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
     sireader_worker_opus, sireader_worker_decision_engineer,
     sireader_worker_market_monitor, sireader_worker_data_archivist;
 REVOKE ALL ON SCHEMA public FROM
     sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
     sireader_worker_opus, sireader_worker_decision_engineer,
     sireader_worker_market_monitor, sireader_worker_data_archivist;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM
-    sireader_worker_supervisor, sireader_worker_haiku, sireader_worker_sonnet,
-    sireader_worker_opus, sireader_worker_decision_engineer,
-    sireader_worker_market_monitor, sireader_worker_data_archivist;
+
+DO $worker_sequence_revoke$
+DECLARE v_sequence text;
+BEGIN
+    v_sequence := pg_catalog.pg_get_serial_sequence('public.workforce_activity_events','event_seq');
+    IF v_sequence IS NULL THEN
+        RAISE EXCEPTION 'workforce activity event identity sequence not found for worker ACL cleanup';
+    END IF;
+    EXECUTE pg_catalog.format(
+        'REVOKE ALL ON SEQUENCE %s FROM sireader_worker_supervisor,sireader_worker_haiku,sireader_worker_sonnet,sireader_worker_opus,sireader_worker_decision_engineer,sireader_worker_market_monitor,sireader_worker_data_archivist',
+        v_sequence
+    );
+END;
+$worker_sequence_revoke$;
 
 CREATE OR REPLACE FUNCTION sireader_workforce_private.worker_identity_v1(p_worker_id text)
 RETURNS text
@@ -1384,40 +1417,6 @@ CREATE TRIGGER trg_sireader_worker_review_provenance
 BEFORE INSERT ON public.workforce_task_reviews
 FOR EACH ROW EXECUTE FUNCTION sireader_workforce_private.guard_worker_review_provenance_v1();
 
--- Each worker can execute only its worker-specific command surface. No base-table grants.
-DO $grants$
-DECLARE
-    v_role text;
-    v_suffix text;
-BEGIN
-    FOREACH v_role IN ARRAY ARRAY[
-        'sireader_worker_supervisor','sireader_worker_haiku','sireader_worker_sonnet',
-        'sireader_worker_opus','sireader_worker_decision_engineer',
-        'sireader_worker_market_monitor','sireader_worker_data_archivist'
-    ] LOOP
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_get_contract_v1(text) TO %I',v_role);
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_heartbeat_v1(text,text,text,timestamptz,timestamptz,integer,integer) TO %I',v_role);
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_claim_next_v1(text,text,integer,integer) TO %I',v_role);
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_start_v1(text,text,text,text) TO %I',v_role);
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_renew_lease_v1(text,text,text,text,integer) TO %I',v_role);
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_complete_task_v1(text,text,text,text,jsonb,text,numeric,jsonb) TO %I',v_role);
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_fail_task_v1(text,text,text,text,text,boolean,boolean,integer) TO %I',v_role);
-    END LOOP;
-    FOREACH v_role IN ARRAY ARRAY['sireader_worker_haiku','sireader_worker_sonnet','sireader_worker_opus'] LOOP
-        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text) TO %I',v_role);
-    END LOOP;
-END;
-$grants$;
-
-REVOKE ALL ON FUNCTION sireader_workforce_private.worker_get_contract_v1(text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION sireader_workforce_private.worker_heartbeat_v1(text,text,text,timestamptz,timestamptz,integer,integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION sireader_workforce_private.worker_claim_next_v1(text,text,integer,integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION sireader_workforce_private.worker_start_v1(text,text,text,text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION sireader_workforce_private.worker_renew_lease_v1(text,text,text,text,integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION sireader_workforce_private.worker_complete_task_v1(text,text,text,text,jsonb,text,numeric,jsonb) FROM PUBLIC;
-REVOKE ALL ON FUNCTION sireader_workforce_private.worker_fail_task_v1(text,text,text,text,text,boolean,boolean,integer) FROM PUBLIC;
-
 -- Function ownership and effective privilege audit.
 DO $audit$
 DECLARE
@@ -1450,6 +1449,33 @@ BEGIN
     END IF;
 END;
 $audit$;
+
+SET ROLE sireader_workforce_fn_owner;
+-- Each worker receives only its worker-specific callable function surface.
+DO $grants$
+DECLARE
+    v_role text;
+    v_suffix text;
+BEGIN
+    FOREACH v_role IN ARRAY ARRAY[
+        'sireader_worker_supervisor','sireader_worker_haiku','sireader_worker_sonnet',
+        'sireader_worker_opus','sireader_worker_decision_engineer',
+        'sireader_worker_market_monitor','sireader_worker_data_archivist'
+    ] LOOP
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_get_contract_v1(text) TO %I',v_role);
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_heartbeat_v1(text,text,text,timestamptz,timestamptz,integer,integer) TO %I',v_role);
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_claim_next_v1(text,text,integer,integer) TO %I',v_role);
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_start_v1(text,text,text,text) TO %I',v_role);
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_renew_lease_v1(text,text,text,text,integer) TO %I',v_role);
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_complete_task_v1(text,text,text,text,jsonb,text,numeric,jsonb) TO %I',v_role);
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_fail_task_v1(text,text,text,text,text,boolean,boolean,integer) TO %I',v_role);
+    END LOOP;
+    FOREACH v_role IN ARRAY ARRAY['sireader_worker_haiku','sireader_worker_sonnet','sireader_worker_opus'] LOOP
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text) TO %I',v_role);
+    END LOOP;
+END;
+$grants$;
+RESET ROLE;
 
 
 -- IMPORTANT: this staging layer replaces neither command API nor maintenance.
@@ -1524,6 +1550,7 @@ CREATE TABLE IF NOT EXISTS sireader_workforce_private.authority_principals (
     created_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
 ALTER TABLE sireader_workforce_private.authority_principals OWNER TO sireader_workforce_fn_owner;
+SET ROLE sireader_workforce_fn_owner;
 REVOKE ALL ON sireader_workforce_private.authority_principals FROM PUBLIC;
 INSERT INTO sireader_workforce_private.authority_principals(database_role,authority_type,actor_id)
 VALUES
@@ -1532,6 +1559,7 @@ VALUES
     ('sireader_workforce_maint','MAINTENANCE','system')
 ON CONFLICT (database_role) DO UPDATE
 SET authority_type=EXCLUDED.authority_type, actor_id=EXCLUDED.actor_id, enabled=true;
+RESET ROLE;
 
 CREATE TABLE IF NOT EXISTS sireader_workforce_private.authority_command_audit (
     command_id varchar(64) PRIMARY KEY,
@@ -1548,7 +1576,9 @@ CREATE TABLE IF NOT EXISTS sireader_workforce_private.authority_command_audit (
     UNIQUE(actor_id,idempotency_key)
 );
 ALTER TABLE sireader_workforce_private.authority_command_audit OWNER TO sireader_workforce_fn_owner;
+SET ROLE sireader_workforce_fn_owner;
 REVOKE ALL ON sireader_workforce_private.authority_command_audit FROM PUBLIC;
+RESET ROLE;
 
 CREATE TABLE IF NOT EXISTS sireader_workforce_private.authority_maintenance_audit (
     run_id varchar(64) PRIMARY KEY,
@@ -1560,7 +1590,9 @@ CREATE TABLE IF NOT EXISTS sireader_workforce_private.authority_maintenance_audi
     result jsonb NOT NULL
 );
 ALTER TABLE sireader_workforce_private.authority_maintenance_audit OWNER TO sireader_workforce_fn_owner;
+SET ROLE sireader_workforce_fn_owner;
 REVOKE ALL ON sireader_workforce_private.authority_maintenance_audit FROM PUBLIC;
+RESET ROLE;
 
 CREATE OR REPLACE FUNCTION sireader_workforce_private.require_authority_v1(p_expected_type text)
 RETURNS text
@@ -2074,7 +2106,8 @@ $function$;
 ALTER FUNCTION sireader_workforce_private.review_get_pending_v1(text) OWNER TO sireader_workforce_fn_owner;
 REVOKE ALL ON FUNCTION sireader_workforce_private.review_get_pending_v1(text) FROM PUBLIC;
 
--- Replace the release trigger predicate with the exact dedicated review authority.
+-- Replace the release trigger predicate as its existing NOLOGIN owner.
+SET ROLE sireader_workforce_fn_owner;
 CREATE OR REPLACE FUNCTION sireader_workforce_private.guard_worker_result_release_v1()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -2140,6 +2173,7 @@ END;
 $function$;
 ALTER FUNCTION sireader_workforce_private.guard_worker_result_release_v1() OWNER TO sireader_workforce_fn_owner;
 REVOKE ALL ON FUNCTION sireader_workforce_private.guard_worker_result_release_v1() FROM PUBLIC;
+RESET ROLE;
 
 CREATE OR REPLACE FUNCTION sireader_workforce_private.review_adjudicate_v1(
     p_review_id text,p_decision text,p_expected_original_sha256 text,
@@ -2517,6 +2551,10 @@ REVOKE ALL ON FUNCTION sireader_workforce_private.maintenance_run_once_v1(intege
 -- Internal function owner receives only the additional writes needed by operator/review/maintenance functions.
 GRANT INSERT ON public.workforce_tasks TO sireader_workforce_fn_owner;
 GRANT UPDATE ON public.workforce_task_reviews, public.workforce_task_review_payloads TO sireader_workforce_fn_owner;
+-- The function owner now owns these entry points/tables. Use its explicit SET
+-- membership for the narrow grants, then return to the migration operator.
+SET ROLE sireader_workforce_fn_owner;
+
 -- Grant only narrow command/read/review/maintenance EXECUTE surfaces.
 GRANT EXECUTE ON FUNCTION sireader_workforce_private.command_enqueue_task_v1(text,text,text,text,jsonb,integer,integer,text),
     sireader_workforce_private.command_cancel_task_v1(text,text),
@@ -2537,6 +2575,11 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA sireader_workforce_private FROM
     sireader_worker_supervisor,sireader_worker_haiku,sireader_worker_sonnet,sireader_worker_opus,
     sireader_worker_decision_engineer,sireader_worker_market_monitor,sireader_worker_data_archivist,
     sireader_workforce_cmd,sireader_workforce_review,sireader_workforce_maint;
+-- New PostgreSQL functions grant EXECUTE to PUBLIC by default. Revoke this
+-- once, as the NOLOGIN function owner, after every private function is owned.
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA sireader_workforce_private FROM PUBLIC;
+
+RESET ROLE;
 
 DO $final_audit$
 DECLARE v_expected_login_roles integer; v_public_exec integer; v_direct_grants integer;
@@ -2618,5 +2661,83 @@ BEGIN
     ) THEN RAISE EXCEPTION 'Function owner role violates NOLOGIN least privilege'; END IF;
 END;
 $final_audit$;
+
+DO $function_acl_audit$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_roles r
+        WHERE r.rolname IN (
+            'sireader_worker_supervisor','sireader_worker_haiku','sireader_worker_sonnet',
+            'sireader_worker_opus','sireader_worker_decision_engineer',
+            'sireader_worker_market_monitor','sireader_worker_data_archivist'
+        )
+        AND (
+            NOT pg_catalog.has_function_privilege(r.rolname,'sireader_workforce_private.worker_get_contract_v1(text)','EXECUTE')
+            OR NOT pg_catalog.has_function_privilege(r.rolname,'sireader_workforce_private.worker_heartbeat_v1(text,text,text,timestamptz,timestamptz,integer,integer)','EXECUTE')
+            OR NOT pg_catalog.has_function_privilege(r.rolname,'sireader_workforce_private.worker_claim_next_v1(text,text,integer,integer)','EXECUTE')
+            OR NOT pg_catalog.has_function_privilege(r.rolname,'sireader_workforce_private.worker_start_v1(text,text,text,text)','EXECUTE')
+            OR NOT pg_catalog.has_function_privilege(r.rolname,'sireader_workforce_private.worker_renew_lease_v1(text,text,text,text,integer)','EXECUTE')
+            OR NOT pg_catalog.has_function_privilege(r.rolname,'sireader_workforce_private.worker_complete_task_v1(text,text,text,text,jsonb,text,numeric,jsonb)','EXECUTE')
+            OR NOT pg_catalog.has_function_privilege(r.rolname,'sireader_workforce_private.worker_fail_task_v1(text,text,text,text,text,boolean,boolean,integer)','EXECUTE')
+        )
+    ) THEN
+        RAISE EXCEPTION 'A worker login is missing one or more lifecycle EXECUTE grants';
+    END IF;
+
+    IF NOT pg_catalog.has_function_privilege('sireader_worker_haiku','sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text)','EXECUTE')
+       OR NOT pg_catalog.has_function_privilege('sireader_worker_sonnet','sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text)','EXECUTE')
+       OR NOT pg_catalog.has_function_privilege('sireader_worker_opus','sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_worker_supervisor','sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_worker_decision_engineer','sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_worker_market_monitor','sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_worker_data_archivist','sireader_workforce_private.worker_reserve_provider_slot_v1(text,text,text,text,text)','EXECUTE') THEN
+        RAISE EXCEPTION 'Provider reservation function grants do not match AI worker allowlist';
+    END IF;
+
+    IF NOT pg_catalog.has_function_privilege('sireader_workforce_cmd','sireader_workforce_private.command_enqueue_task_v1(text,text,text,text,jsonb,integer,integer,text)','EXECUTE')
+       OR NOT pg_catalog.has_function_privilege('sireader_workforce_cmd','sireader_workforce_private.command_cancel_task_v1(text,text)','EXECUTE')
+       OR NOT pg_catalog.has_function_privilege('sireader_workforce_cmd','sireader_workforce_private.command_retry_task_v1(text,text)','EXECUTE')
+       OR NOT pg_catalog.has_function_privilege('sireader_workforce_cmd','sireader_workforce_private.command_set_worker_scheduling_v1(text,boolean,text)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_workforce_cmd','sireader_workforce_private.review_get_pending_v1(text)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_workforce_cmd','sireader_workforce_private.maintenance_run_once_v1(integer,timestamptz)','EXECUTE') THEN
+        RAISE EXCEPTION 'Command API function grants are not the exact allowlist';
+    END IF;
+
+    IF NOT pg_catalog.has_function_privilege('sireader_workforce_review','sireader_workforce_private.review_get_pending_v1(text)','EXECUTE')
+       OR NOT pg_catalog.has_function_privilege('sireader_workforce_review','sireader_workforce_private.review_adjudicate_v1(text,text,text,jsonb,text,text,text)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_workforce_review','sireader_workforce_private.command_cancel_task_v1(text,text)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_workforce_review','sireader_workforce_private.maintenance_run_once_v1(integer,timestamptz)','EXECUTE') THEN
+        RAISE EXCEPTION 'Trusted review function grants are not the exact allowlist';
+    END IF;
+
+    IF NOT pg_catalog.has_function_privilege('sireader_workforce_maint','sireader_workforce_private.maintenance_run_once_v1(integer,timestamptz)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_workforce_maint','sireader_workforce_private.command_cancel_task_v1(text,text)','EXECUTE')
+       OR pg_catalog.has_function_privilege('sireader_workforce_maint','sireader_workforce_private.review_get_pending_v1(text)','EXECUTE') THEN
+        RAISE EXCEPTION 'Maintenance function grants are not the exact allowlist';
+    END IF;
+END;
+$function_acl_audit$;
+
+REVOKE CREATE ON SCHEMA sireader_workforce_private FROM sireader_workforce_fn_owner;
+REVOKE sireader_workforce_fn_owner FROM postgres;
+
+DO $final_owner_audit$
+BEGIN
+    -- A CREATEROLE creator retains its implicit ADMIN membership on roles it creates.
+    -- This is safe only when that membership cannot SET or INHERIT after the migration.
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_auth_members m
+        WHERE m.member='sireader_migration_operator'::regrole
+          AND m.roleid='sireader_workforce_fn_owner'::regrole
+          AND (m.set_option OR m.inherit_option)
+    )
+       OR pg_catalog.has_schema_privilege('sireader_workforce_fn_owner',
+           'sireader_workforce_private','CREATE')
+       OR NOT pg_catalog.has_schema_privilege('sireader_workforce_fn_owner',
+           'sireader_workforce_private','USAGE') THEN
+        RAISE EXCEPTION 'Function owner retained temporary SET/INHERIT/schema CREATE privileges';
+    END IF;
+END;
+$final_owner_audit$;
 
 COMMIT;

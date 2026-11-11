@@ -81,8 +81,31 @@ BEGIN
 END;
 $policies$;
 
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM sireader_workforce_fn_owner;
-REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM sireader_workforce_fn_owner;
+REVOKE ALL PRIVILEGES ON TABLE
+    public.workforce_workers,
+    public.workforce_capabilities,
+    public.workforce_worker_capabilities,
+    public.workforce_heartbeats,
+    public.workforce_tasks,
+    public.workforce_task_attempts,
+    public.workforce_activity_events,
+    public.workforce_task_reviews,
+    public.workforce_task_review_payloads
+FROM sireader_workforce_fn_owner;
+
+DO $sequence_revoke$
+DECLARE v_sequence text;
+BEGIN
+    v_sequence := pg_catalog.pg_get_serial_sequence('public.workforce_activity_events','event_seq');
+    IF v_sequence IS NOT NULL THEN
+        EXECUTE pg_catalog.format(
+            'REVOKE ALL PRIVILEGES ON SEQUENCE %s FROM sireader_workforce_fn_owner',
+            v_sequence
+        );
+    END IF;
+END;
+$sequence_revoke$;
+
 REVOKE ALL PRIVILEGES ON SCHEMA public, extensions FROM sireader_workforce_fn_owner;
 DROP SCHEMA sireader_workforce_private CASCADE;
 

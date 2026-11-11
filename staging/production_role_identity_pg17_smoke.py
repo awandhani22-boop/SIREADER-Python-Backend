@@ -27,7 +27,7 @@ from app.command_api.server import create_command_app
 from app.workers import maintenance
 
 
-DB = "sireader_cutover_rehearsal_20261111"
+DB = "sireader_managed_role_rehearsal_20261112"
 TOKEN = "SIREADER-CUTOVER-ROLE-SMOKE-TOKEN-0123456789"
 
 
