@@ -56,6 +56,8 @@ def validate_command_database_security(session: Session) -> None:
     """Fail closed unless this login has only the declared workforce privileges."""
     identity = session.execute(text("""
         SELECT current_user AS role_name,
+          session_user AS session_role,
+          pg_catalog.split_part(session_user::text,'.',1) AS normalized_session_role,
           current_setting('transaction_read_only') AS transaction_read_only,
           r.rolcanlogin, r.rolsuper, r.rolinherit, r.rolcreatedb,
           r.rolcreaterole, r.rolreplication, r.rolbypassrls,
@@ -236,3 +238,166 @@ def validate_command_database_security(session: Session) -> None:
     """)).scalar_one()
     if audit_mutation:
         raise RuntimeError("Workforce command audit must be append-only for the command role.")
+
+
+# The function-only command contract is the preferred production boundary.
+# The legacy ORM-grant validator above remains for the existing local Phase 5 DB.
+FUNCTION_ROLE_SURFACES = {
+    "sireader_workforce_cmd": {
+        "sireader_workforce_private.command_enqueue_task_v1(text,text,text,text,jsonb,integer,integer,text)",
+        "sireader_workforce_private.command_cancel_task_v1(text,text)",
+        "sireader_workforce_private.command_retry_task_v1(text,text)",
+        "sireader_workforce_private.command_set_worker_scheduling_v1(text,boolean,text)",
+    },
+    "sireader_workforce_review": {
+        "sireader_workforce_private.review_get_pending_v1(text)",
+        "sireader_workforce_private.review_adjudicate_v1(text,text,text,jsonb,text,text,text)",
+    },
+    "sireader_workforce_maint": {
+        "sireader_workforce_private.maintenance_run_once_v1(integer,timestamptz)",
+    },
+}
+
+
+def _validate_function_identity(session: Session, *, expected_role: str) -> None:
+    identity = session.execute(text("""
+        SELECT current_user AS role_name,
+          pg_catalog.split_part(session_user::text,'.',1) AS normalized_session_role,
+          current_setting('transaction_read_only') AS transaction_read_only,
+          r.rolcanlogin,r.rolsuper,r.rolinherit,r.rolcreatedb,
+          r.rolcreaterole,r.rolreplication,r.rolbypassrls,
+          has_schema_privilege(current_user,'sireader_workforce_private','USAGE') AS private_usage,
+          has_schema_privilege(current_user,'sireader_workforce_private','CREATE') AS private_create,
+          (SELECT count(*) FROM pg_catalog.pg_auth_members m WHERE m.member=r.oid) AS membership_count
+        FROM pg_catalog.pg_roles r WHERE r.rolname=current_user
+    """)).mappings().one_or_none()
+    if identity is None:
+        raise RuntimeError("Unable to verify workforce function database identity.")
+    if not (
+        identity["role_name"] == expected_role
+        and identity["normalized_session_role"] == expected_role
+        and identity["transaction_read_only"] == "off"
+        and identity["rolcanlogin"] is True
+        and identity["rolsuper"] is False
+        and identity["rolinherit"] is False
+        and identity["rolcreatedb"] is False
+        and identity["rolcreaterole"] is False
+        and identity["rolreplication"] is False
+        and identity["rolbypassrls"] is False
+        and identity["private_usage"] is True
+        and identity["private_create"] is False
+        and int(identity["membership_count"]) == 0
+    ):
+        raise RuntimeError("Workforce function database role violates the least-privilege identity contract.")
+
+    direct_access = session.execute(text("""
+        SELECT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_class c
+          JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname='public'
+            AND c.relname LIKE 'workforce_%'
+            AND c.relkind IN ('r','p')
+            AND (
+              has_table_privilege(current_user,c.oid,'SELECT')
+              OR has_table_privilege(current_user,c.oid,'INSERT')
+              OR has_table_privilege(current_user,c.oid,'UPDATE')
+              OR has_table_privilege(current_user,c.oid,'DELETE')
+              OR has_table_privilege(current_user,c.oid,'TRUNCATE')
+              OR has_table_privilege(current_user,c.oid,'REFERENCES')
+              OR has_table_privilege(current_user,c.oid,'TRIGGER')
+            )
+        )
+    """)).scalar_one()
+    if direct_access:
+        raise RuntimeError("Workforce function role must not have direct workforce base-table privileges.")
+
+    rls = session.execute(text("""
+        SELECT count(*) AS total,
+          count(*) FILTER (WHERE relrowsecurity) AS enabled
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relname LIKE 'workforce_%'
+          AND c.relkind IN ('r','p')
+    """)).mappings().one()
+    if int(rls["total"]) < 9 or int(rls["total"]) != int(rls["enabled"]):
+        raise RuntimeError("Every workforce base table must have row-level security enabled.")
+
+    owner = session.execute(text("""
+        SELECT r.rolcanlogin,r.rolsuper,r.rolinherit,r.rolcreatedb,r.rolcreaterole,
+          r.rolreplication,r.rolbypassrls
+        FROM pg_catalog.pg_roles r WHERE r.rolname='sireader_workforce_fn_owner'
+    """)).mappings().one_or_none()
+    if owner is None or any((
+        owner["rolcanlogin"],owner["rolsuper"],owner["rolinherit"],owner["rolcreatedb"],
+        owner["rolcreaterole"],owner["rolreplication"],owner["rolbypassrls"],
+    )):
+        raise RuntimeError("SECURITY DEFINER function owner is not a hardened NOLOGIN role.")
+
+
+def validate_command_function_security(session: Session) -> None:
+    """Validate the functions-only Command API identity and exact callable surface."""
+    expected_role = "sireader_workforce_cmd"
+    _validate_function_identity(session, expected_role=expected_role)
+    _validate_function_surface(session, expected_role=expected_role)
+
+
+def validate_review_function_security(session: Session) -> None:
+    """Validate the separate trusted review operator database identity."""
+    expected_role = "sireader_workforce_review"
+    _validate_function_identity(session, expected_role=expected_role)
+    _validate_function_surface(session, expected_role=expected_role)
+
+
+def validate_maintenance_function_security(session: Session) -> None:
+    """Validate the separate bounded maintenance identity before any operation."""
+    expected_role = "sireader_workforce_maint"
+    _validate_function_identity(session, expected_role=expected_role)
+    _validate_function_surface(session, expected_role=expected_role)
+
+
+def _validate_function_surface(session: Session, *, expected_role: str) -> None:
+    signatures = FUNCTION_ROLE_SURFACES[expected_role]
+    rows = session.execute(text("""
+        SELECT p.oid::regprocedure::text AS signature,
+          p.prosecdef AS security_definer,
+          COALESCE(p.proconfig,'{}'::text[]) AS function_config,
+          owner.rolcanlogin AS owner_can_login,
+          owner.rolsuper AS owner_superuser,
+          owner.rolinherit AS owner_inherit,
+          owner.rolbypassrls AS owner_bypassrls,
+          has_function_privilege(current_user,p.oid,'EXECUTE') AS executable,
+          EXISTS (
+            SELECT 1 FROM pg_catalog.aclexplode(
+              COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))
+            ) acl
+            WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'
+          ) AS public_execute
+        FROM pg_catalog.pg_proc p
+        JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+        JOIN pg_catalog.pg_roles owner ON owner.oid=p.proowner
+        WHERE n.nspname='sireader_workforce_private'
+    """)).mappings().all()
+
+    actual = {
+        row["signature"].replace(" ", "")
+        for row in rows if row["executable"]
+    }
+    expected = {signature.replace(" ", "") for signature in signatures}
+    if actual != expected:
+        raise RuntimeError("Workforce database function EXECUTE grants do not match the role-specific allowlist.")
+
+    for row in rows:
+        config = set(row["function_config"] or [])
+        if row["public_execute"] is True:
+            raise RuntimeError("PUBLIC must not have EXECUTE on any private workforce function.")
+        if row["security_definer"] is True and (
+            row["owner_can_login"] is True
+            or row["owner_superuser"] is True
+            or row["owner_inherit"] is True
+            or row["owner_bypassrls"] is True
+            or "search_path=pg_catalog" not in config
+        ):
+            raise RuntimeError("A private SECURITY DEFINER function has an unsafe owner or search_path.")
+        if row["signature"].replace(" ", "") in expected and row["security_definer"] is not True:
+            raise RuntimeError("An authority entry function must be SECURITY DEFINER.")

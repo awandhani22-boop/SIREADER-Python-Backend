@@ -128,3 +128,15 @@ Current sanitized topology remains split: core DATABASE_URL is remote/pooler usi
 **SIREADER Virtual Office v1.0:** NOT RELEASED.
 
 Do not weaken the staging database guard, repurpose the staging SQL as a production migration, provision production credentials, enable LIVE flags, or infer paid-provider authorization from these results.
+
+
+
+## Superseding authority and restored-backup rehearsal update — 2026-11-11
+
+The operator Command API, trusted review operator and bounded maintenance authority are now implemented in the Phase 7.4 staging SQL and a production migration draft. The Python Command API routes to those functions when the complete layer is installed; partial installation fails closed. Review requires a distinct `sireader_workforce_review` database pool and derives the actor from the authenticated database session, not `X-Operator-Id`. Maintenance uses its own `sireader_workforce_maint` URL/role, enforces remote TLS and a batch limit of 500, forbids caller-supplied maintenance time, and checks actual database identity, RLS, function owner/search_path, grants and PUBLIC EXECUTE. Legacy local ORM paths remain loopback/local-only.
+
+A fresh PostgreSQL 17.11 restore of the local Supabase backup passed the four workforce/read-model baseline migrations, the new production authority forward migration, the guarded rollback, and forward migration again. The rollback preserves the Phase 4 workforce tables/RLS and 14 read-only API views and refuses to run once operational data or a worker LOGIN session exists. The final rehearsal recorded nine workforce base tables with RLS, fourteen security-barrier views, ten hardened LOGIN roles without passwords, zero role memberships, zero direct base-table grants for those LOGIN roles and zero PUBLIC EXECUTE in the private schema.
+
+Application identity validators passed using actual local PostgreSQL LOGIN sessions for Command, Review and Maintenance. SQL acceptance and Python smoke tests used only synthetic fixtures and rolled back. The connected hosted Supabase project was not modified; production credentials are not provisioned. The hosted target remains missing the workforce schema/authority layer, and managed-Supabase pooler/PostgREST staging, change-window backup/restore approval, fresh paid-LIVE authorization and final owner sign-off remain open.
+
+Full rehearsal evidence: https://github.com/awandhani22-boop/SIREADER-Python-Backend/blob/phase-5-implementation/docs/PHASE_7_4_PRODUCTION_MIGRATION_REHEARSAL_2026-11-11.md

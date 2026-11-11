@@ -171,3 +171,18 @@ This addendum supersedes earlier open findings for the isolated worker command-l
 A custom-format local backup was taken before updating the staging SQL. After the tests, the PostgreSQL 17.11 staging process was stopped, port 55439 was verified closed, temporary HBA configuration was removed, and transaction-created test fixtures/roles/policies were confirmed absent.
 
 **Disposition:** the worker command boundary and policy parity pass the local staging security review with the remediations above. This is not a production migration or hosted-Supabase acceptance. Production worker/maintenance/command/review identities, production forward/rollback migration, managed-platform staging, backup/recovery approval, API cutover and fresh limited-LIVE authorization remain OPEN/BLOCKED. SIREADER Virtual Office v1.0 remains NOT RELEASED.
+
+
+
+## Superseding command/review/maintenance and production-migration rehearsal — 2026-11-11
+
+The staging authority contract now also covers operator Command API, trusted review and bounded maintenance:
+
+- Command API functions: enqueue non-trading task, cancel (post-provider uncertainty becomes UNKNOWN/WAITING_REVIEW), retry only when provider request is proven not sent, worker scheduling pause/resume. Idempotency fingerprints bind the command type and actor.
+- Review functions: pending review read and APPROVED/EDITED/REJECTED adjudication against the expected original SHA, exact completed task/attempt and pending state. Database session identity is the actor. Edited output is sanitized before publication; rejected output remains unreleased.
+- Maintenance is one bounded entry function with batch size 1–500, DB-authoritative time, isolated maintenance role, lease/deadline/review expiry and retention operations, plus a distinct maintenance audit record.
+- Direct workforce base-table privileges are not granted to worker/command/review/maintenance LOGIN roles; each role gets only its named function EXECUTE surface. There is no cross-role execute permission or PUBLIC EXECUTE on private functions.
+
+Permanent SQL acceptance script `staging/test_operator_review_maintenance_command_layer_v1.sql` passed. It tests enqueue/replay/cancel/pause/resume, cross-command idempotency conflict, uncertain provider cancellation, safe retry, review approve/edit/reject and sanitization, bounded maintenance recovery/expiry/purge/audit, batch/time limits and negative ACL cases. The whole test is inside one transaction and ends with ROLLBACK.
+
+The fresh restored-backup PG17.11 rehearsal subsequently passed all five forward migrations, rollback and re-application. Actual PostgreSQL LOGIN identity validation in Python passed for Command, Review and Maintenance. Full detail: https://github.com/awandhani22-boop/SIREADER-Python-Backend/blob/phase-5-implementation/docs/PHASE_7_4_PRODUCTION_MIGRATION_REHEARSAL_2026-11-11.md

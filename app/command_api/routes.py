@@ -7,11 +7,21 @@ from hashlib import sha256
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.command_api.security import enforce_command_rate_limit, verify_command_bearer
+from app.command_api.database_commands import (
+    command_functions_available,
+    review_functions_available,
+    enqueue_task as db_enqueue_task,
+    cancel_task as db_cancel_task,
+    retry_task as db_retry_task,
+    set_worker_scheduling as db_set_worker_scheduling,
+    adjudicate_review as db_adjudicate_review,
+)
 from app.command_api.service import CommandConflictError, execute_idempotent_command
 from app.workers.models import ActorType, WorkTaskAttemptRecord, WorkTaskRecord
 from app.workers.registry import CAPABILITY_CATALOG
@@ -193,6 +203,64 @@ def get_command_session(request: Request):
         session.close()
 
 
+def get_review_session(request: Request):
+    """Resolve the trusted review identity; never reuse the command login in function mode."""
+    require_dedicated = bool(getattr(request.app.state, "require_dedicated_review_identity", False))
+    factory = getattr(request.app.state, "review_session_factory", None)
+    if factory is None and not require_dedicated:
+        factory = getattr(request.app.state, "session_factory", None)
+    if factory is None:
+        raise HTTPException(status_code=503, detail="Trusted review database identity is unavailable.")
+    session: Session = factory()
+    try:
+        yield session
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _has_command_function_layer(db: Session) -> bool:
+    bind = db.get_bind()
+    return bind.dialect.name == "postgresql" and command_functions_available(db)
+
+
+def _has_review_function_layer(db: Session) -> bool:
+    bind = db.get_bind()
+    return bind.dialect.name == "postgresql" and review_functions_available(db)
+
+
+def _run_database_function(db: Session, executor) -> dict:
+    """Run exactly one versioned database function in a single transaction."""
+    try:
+        result = executor()
+        # The function-presence probe may have opened the SQLAlchemy autobegin
+        # transaction already; commit that same transaction with the command.
+        db.commit()
+        return result
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        message = str(getattr(exc, "orig", exc))
+        for code, detail in (
+            ("IDEMPOTENCY_CONFLICT", "IDEMPOTENCY_CONFLICT"),
+            ("REVIEW_HASH_CONFLICT", "REVIEW_HASH_CONFLICT"),
+            ("TASK_NOT_SAFE_TO_RETRY", "TASK_NOT_SAFE_TO_RETRY"),
+            ("TASK_PROVIDER_OUTCOME_NOT_CONFIRMED_SAFE", "TASK_PROVIDER_OUTCOME_NOT_CONFIRMED_SAFE"),
+            ("TASK_ALREADY_RETRIED", "TASK_ALREADY_RETRIED"),
+            ("WORKER_UNAVAILABLE", "WORKER_UNAVAILABLE"),
+        ):
+            if code in message:
+                raise HTTPException(status_code=409, detail=detail) from exc
+        if "Task not found" in message or "Review is not pending" in message:
+            raise HTTPException(status_code=404 if "Task not found" in message else 409,
+                                detail="WORKFORCE_COMMAND_REJECTED") from exc
+        raise HTTPException(status_code=409, detail="WORKFORCE_COMMAND_REJECTED") from exc
+
+
 def _run(
     db: Session,
     *,
@@ -203,23 +271,28 @@ def _run(
     actor_id: str = "local_operator",
 ) -> dict:
     try:
-        with db.begin():
-            return execute_idempotent_command(
-                db,
-                command_type=command_type,
-                idempotency_key=idempotency_key,
-                request_body=body,
-                executor=executor,
-                actor_id=actor_id,
-            )
+        result = execute_idempotent_command(
+            db,
+            command_type=command_type,
+            idempotency_key=idempotency_key,
+            request_body=body,
+            executor=executor,
+            actor_id=actor_id,
+        )
+        db.commit()
+        return result
     except CommandConflictError as exc:
+        db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except WorkerUnavailableError as exc:
+        db.rollback()
         raise HTTPException(status_code=409, detail="WORKER_UNAVAILABLE") from exc
     except WorkforceRepositoryError as exc:
+        db.rollback()
         status = 404 if "not found" in str(exc).lower() else 409
         raise HTTPException(status_code=status, detail="WORKFORCE_COMMAND_REJECTED") from exc
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(status_code=400, detail="COMMAND_VALIDATION_FAILED") from exc
 
 
@@ -249,6 +322,18 @@ def enqueue_non_trading_task(
 ) -> dict:
     key = _idempotency_key(idempotency_key)
     body = request.model_dump(mode="json")
+    if _has_command_function_layer(db):
+        return _run_database_function(db, lambda: db_enqueue_task(
+            db,
+            task_type=request.task_type,
+            title=request.title,
+            required_capability=request.required_capability,
+            requested_worker_id=request.requested_worker_id,
+            input_payload=request.input_payload,
+            priority=request.priority,
+            max_attempts=request.max_attempts,
+            idempotency_key=key,
+        ))
 
     def execute(correlation_id: str):
         task, created = enqueue_task(
@@ -279,6 +364,10 @@ def cancel_non_trading_task(
 ) -> dict:
     key = _idempotency_key(idempotency_key)
     body = request.model_dump(mode="json")
+    if _has_command_function_layer(db):
+        return _run_database_function(
+            db, lambda: db_cancel_task(db, task_id=request.task_id, idempotency_key=key)
+        )
 
     def execute(_command_correlation_id: str):
         original = db.scalar(
@@ -306,6 +395,10 @@ def retry_failed_non_trading_task(
 ) -> dict:
     key = _idempotency_key(idempotency_key)
     body = request.model_dump(mode="json")
+    if _has_command_function_layer(db):
+        return _run_database_function(
+            db, lambda: db_retry_task(db, task_id=request.task_id, idempotency_key=key)
+        )
 
     def execute(_command_correlation_id: str):
         original = db.scalar(
@@ -390,6 +483,13 @@ def set_worker_scheduling(
 ) -> dict:
     key = _idempotency_key(idempotency_key)
     body = request.model_dump(mode="json")
+    if _has_command_function_layer(db):
+        return _run_database_function(db, lambda: db_set_worker_scheduling(
+            db,
+            worker_id=request.worker_id,
+            accepting_tasks=request.accepting_tasks,
+            idempotency_key=key,
+        ))
 
     def execute(correlation_id: str):
         worker = set_worker_accepting_tasks(
@@ -410,13 +510,27 @@ def adjudicate_task_review(
     request: AdjudicateReviewRequest,
     operator_id: str = Header(..., alias="X-Operator-Id"),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    db: Session = Depends(get_command_session),
+    db: Session = Depends(get_review_session),
 ) -> dict:
     if not operator_id or not re.fullmatch(r"[A-Za-z0-9._~-]{3,64}", operator_id):
         raise HTTPException(status_code=400, detail="A valid X-Operator-Id header is required.")
 
     key = _idempotency_key(idempotency_key)
     body = request.model_dump(mode="json")
+    if _has_review_function_layer(db):
+        # In function mode the database session identity is the actor of record.
+        # The legacy X-Operator-Id header is validated for compatibility only
+        # and is intentionally not forwarded as an authorization claim.
+        return _run_database_function(db, lambda: db_adjudicate_review(
+            db,
+            review_id=request.review_id,
+            decision=request.decision,
+            expected_original_sha256=request.expected_original_sha256,
+            adjusted_output=request.adjusted_output,
+            reason_code=request.reason_code,
+            notes=request.notes,
+            idempotency_key=key,
+        ))
 
     def execute(correlation_id: str):
         rev, task = adjudicate_review(
