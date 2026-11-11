@@ -24,6 +24,11 @@ CURRENCY_IDR = "IDR"
 CURRENCY_USD = "USD"
 
 IDR_MODEL_PREFIX = "tokenmurah/"
+DIRECT_ANTHROPIC_MODELS = frozenset({
+    "claude-haiku-5-5",
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+})
 FAMILY_HAIKU = "HAIKU"
 FAMILY_SONNET = "SONNET"
 FAMILY_OPUS = "OPUS"
@@ -113,10 +118,13 @@ def model_family(model):
 
 
 def model_currency(model):
-    """IDR hanya untuk TokenMurah, USD hanya untuk prefix Anthropic."""
-    prefix = model_prefix(model)
+    """Resolve direct official Anthropic IDs and legacy provider-prefixed IDs."""
+    normalized = str(model).strip().lower() if isinstance(model, str) else ""
+    prefix = model_prefix(normalized)
     if prefix == IDR_MODEL_PREFIX:
         return CURRENCY_IDR
+    if normalized in DIRECT_ANTHROPIC_MODELS:
+        return CURRENCY_USD
     if prefix == str(settings.AI_ANTHROPIC_MODEL_PREFIX).strip().lower():
         return CURRENCY_USD
     return None
@@ -329,24 +337,38 @@ def estimate_request_cost(
 # TARIF USD (ANTHROPIC)
 # ============================================================
 
-def estimate_request_usd(model, prompt_text, max_output_tokens=None):
-    """Estimasi reservasi USD dengan tarif input termahal dan safety 50%."""
+def estimate_request_usd(
+    model,
+    prompt_text,
+    max_output_tokens=None,
+    *,
+    estimated_input_tokens=None,
+    extra_input_tokens=0,
+):
+    """Reserve USD from Anthropic token-count preflight when supplied.
+
+    The byte-length fallback remains available for offline estimates and
+    historical callers. Production requests should pass model-specific counts.
+    """
     billing = resolve_billing(model)
     if billing["currency"] != CURRENCY_USD:
         raise ValueError(f"Model {model!r} bukan provider USD.")
 
-    input_tokens = estimate_input_tokens(prompt_text)
+    if estimated_input_tokens is None:
+        input_tokens = estimate_input_tokens(prompt_text)
+    else:
+        _validate_tokens(estimated_input_tokens=estimated_input_tokens)
+        input_tokens = estimated_input_tokens
+    _validate_tokens(extra_input_tokens=extra_input_tokens)
+    input_tokens += extra_input_tokens
+
     if max_output_tokens is None:
         raise ValueError("max_output_tokens wajib untuk estimasi USD.")
     _validate_tokens(input_tokens=input_tokens, output_tokens=max_output_tokens)
 
     prices = _usd_price_table(billing["family"])
     threshold = int(settings.AI_ANTHROPIC_LONG_CONTEXT_TOKENS)
-    if (
-        billing["long_context_capable"]
-        and input_tokens > threshold
-        and prices["long"] is not None
-    ):
+    if billing["long_context_capable"] and input_tokens > threshold and prices["long"] is not None:
         prices = prices["long"]
 
     worst_input = max(
@@ -359,8 +381,7 @@ def estimate_request_usd(model, prompt_text, max_output_tokens=None):
         (
             Decimal(input_tokens) * worst_input
             + Decimal(max_output_tokens) * Decimal(str(prices["output"]))
-        )
-        / ONE_MILLION
+        ) / ONE_MILLION
     )
     reserved = _money(estimated * SAFETY_FACTOR)
     return {
@@ -505,8 +526,13 @@ def _sum_costs_usd(db, filters):
 
 
 def _daily_totals(db, usage_date):
-    """Total penggunaan seluruh model pada tanggal lokal hari ini."""
+    """Total penggunaan seluruh model IDR pada tanggal lokal hari ini."""
     return _sum_costs(db, [AIUsageLog.usage_date == usage_date])
+
+
+def _daily_usd_totals(db, usage_date):
+    """Total aktual + reservasi USD pada tanggal lokal hari ini."""
+    return _sum_costs_usd(db, [AIUsageLog.usage_date == usage_date])
 
 
 def _monthly_totals(db, usage_date, tier=None):
@@ -645,10 +671,12 @@ def get_daily_usage():
 
 
 def get_anthropic_usage(usage_date=None):
-    """Snapshot budget Anthropic USD, terpisah penuh dari laporan Rupiah."""
+    """Snapshot budget Anthropic USD harian dan bulanan, terpisah dari laporan Rupiah."""
     usage_date = usage_date or current_usage_date()
+    daily_budget = _money(settings.AI_ANTHROPIC_DAILY_BUDGET_USD)
     budget = _money(settings.AI_ANTHROPIC_MONTHLY_BUDGET_USD)
     with SessionLocal() as db:
+        daily_actual, daily_reserved = _daily_usd_totals(db, usage_date)
         actual, reserved = _monthly_usd_totals(db, usage_date)
         actual_tokens = _monthly_token_totals(db, usage_date, currency=CURRENCY_USD)
         reserved_tokens = _monthly_token_totals(
@@ -666,10 +694,19 @@ def get_anthropic_usage(usage_date=None):
                     db, usage_date, tier=tier, currency=CURRENCY_USD
                 ),
             }
+    daily_projected = daily_actual + daily_reserved
     projected = actual + reserved
     percent = (projected / budget * Decimal("100")) if budget > 0 else Decimal("0")
     return {
         "currency": CURRENCY_USD,
+        "daily_date": usage_date.isoformat(),
+        "daily_budget_usd": daily_budget,
+        "daily_actual_cost_usd": _money(daily_actual),
+        "daily_reserved_cost_usd": _money(daily_reserved),
+        "daily_projected_cost_usd": _money(daily_projected),
+        "daily_remaining_usd": _money(max(Decimal("0"), daily_budget - daily_projected)),
+        "daily_budget_enabled": daily_budget > 0,
+        "daily_budget_reached": daily_budget <= 0 or daily_projected >= daily_budget,
         "period_start": current_period_start(usage_date).isoformat(),
         "period_end": usage_date.isoformat(),
         "period_days": int(settings.AI_BUDGET_PERIOD_DAYS),
@@ -765,6 +802,7 @@ def reserve_ai_request(
     analysis_log_id=None,
     max_cost_rp=None,
     max_cost_usd=None,
+    estimated_input_tokens=None,
 ):
     """Reservasi atomik; currency ditentukan dari model/provider, bukan tier."""
     tier = tier.upper()
@@ -787,6 +825,7 @@ def reserve_ai_request(
             config=config,
             max_cost_rp=max_cost_rp,
             max_cost_usd=max_cost_usd,
+            estimated_input_tokens=estimated_input_tokens,
         )
 
     return _reserve_idr(
@@ -911,6 +950,7 @@ def _reserve_usd(
     config,
     max_cost_rp=None,
     max_cost_usd=None,
+    estimated_input_tokens=None,
 ):
     output_limit = (
         max_output_tokens if max_output_tokens is not None else config["max_output"]
@@ -919,12 +959,19 @@ def _reserve_usd(
         model=model,
         prompt_text=prompt_text,
         max_output_tokens=output_limit,
+        estimated_input_tokens=estimated_input_tokens,
+        extra_input_tokens=extra_input_tokens,
     )
     _validate_tokens(extra_input_tokens=extra_input_tokens)
     usage_date = current_usage_date()
     new_reserved = estimate["reserved_cost_usd"]
     _validate_task_cost_limit(CURRENCY_USD, new_reserved, max_cost_rp, max_cost_usd)
+    daily_budget = _money(settings.AI_ANTHROPIC_DAILY_BUDGET_USD)
     budget = _money(settings.AI_ANTHROPIC_MONTHLY_BUDGET_USD)
+    if daily_budget <= 0:
+        raise BudgetExceededError(
+            "AI request ditolak: hard daily Anthropic USD budget belum diotorisasi."
+        )
 
     with SessionLocal() as db:
         _lock_budget(db)
@@ -933,6 +980,13 @@ def _reserve_usd(
         )
         if existing:
             raise DuplicateRequestError("Request ID sudah pernah digunakan.")
+
+        daily_actual, daily_reserved = _daily_usd_totals(db, usage_date)
+        daily_projected = daily_actual + daily_reserved
+        if daily_projected + new_reserved > daily_budget:
+            raise BudgetExceededError(
+                "AI request ditolak: hard daily Anthropic USD budget tidak mencukupi."
+            )
 
         monthly_actual, monthly_reserved = _monthly_usd_totals(db, usage_date)
         monthly_projected = monthly_actual + monthly_reserved
@@ -947,7 +1001,7 @@ def _reserve_usd(
             provider=settings.AI_PROVIDER,
             model=model,
             tier=tier,
-            input_tokens=estimate["estimated_input_tokens"] + int(extra_input_tokens),
+            input_tokens=estimate["estimated_input_tokens"],
             output_tokens=estimate["reserved_output_tokens"],
             cache_read_tokens=0,
             cache_write_tokens=0,

@@ -159,12 +159,18 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
 
     daily_totals = {"actual": Decimal("0"), "reserved": Decimal("0")}
     daily_status: dict[str, int] = {}
+    daily_usd_totals = {"actual": Decimal("0"), "reserved": Decimal("0")}
+    daily_usd_status: dict[str, int] = {}
     for row in daily_rows:
         if row["billing_currency"] == "IDR":
             daily_totals["actual"] += amount(row, "IDR", "cost")
             daily_totals["reserved"] += amount(row, "IDR", "reserved")
             daily_status[str(row["status"])] = daily_status.get(str(row["status"]), 0) + int(row["requests"])
-        elif row["billing_currency"] != "USD":
+        elif row["billing_currency"] == "USD":
+            daily_usd_totals["actual"] += amount(row, "USD", "cost")
+            daily_usd_totals["reserved"] += amount(row, "USD", "reserved")
+            daily_usd_status[str(row["status"])] = daily_usd_status.get(str(row["status"]), 0) + int(row["requests"])
+        else:
             _checked_currency(row["billing_currency"])
 
     month_totals: dict[str, dict[str, Any]] = {
@@ -192,6 +198,14 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
     )
     idr_month = month_totals["IDR"]
     usd_month = month_totals["USD"]
+    daily_usd_budget = Decimal(str(api_settings.AI_ANTHROPIC_DAILY_BUDGET_USD))
+    daily_usd = _budget_window(
+        currency="USD", window="DAILY", start=today, end=today,
+        budget=daily_usd_budget,
+        hard_limit=daily_usd_budget if daily_usd_budget > 0 else None,
+        actual=daily_usd_totals["actual"], reserved=daily_usd_totals["reserved"],
+        status_counts=daily_usd_status,
+    )
     rolling_idr = _budget_window(
         currency="IDR", window="ROLLING_MONTH", start=month_start, end=today,
         budget=Decimal(str(api_settings.AI_MONTHLY_BUDGET_RP)),
@@ -285,8 +299,9 @@ def _budget_observability(session: Session, today: date) -> BudgetObservabilityD
             projected_cost=actual + reserved, requests=int(row["requests"]),
         ))
     return BudgetObservabilityDTO(
-        daily_idr=daily_idr, rolling_month_idr=rolling_idr,
-        monthly_anthropic_usd=monthly_usd, idr_tiers=idr_tiers,
+        daily_idr=daily_idr, daily_anthropic_usd=daily_usd,
+        rolling_month_idr=rolling_idr, monthly_anthropic_usd=monthly_usd,
+        idr_tiers=idr_tiers,
         worker_breakdown=worker_breakdown, recent_task_costs=recent_task_costs,
     )
 

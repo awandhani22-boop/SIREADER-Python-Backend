@@ -256,6 +256,10 @@ view_owner_columns(table_name, column_name) AS (
 view_rows AS (
     SELECT
         c.relname,
+        COALESCE(
+            c.reloptions @> ARRAY['security_barrier=true']::text[],
+            FALSE
+        ) AS security_barrier_enabled,
         owner_role.rolname AS owner_name,
         owner_role.rolcanlogin AS owner_can_login,
         owner_role.rolsuper AS owner_is_superuser,
@@ -421,6 +425,7 @@ view_stats AS (
         COUNT(*) AS view_count,
         COALESCE(BOOL_AND(owner_name = 'sireader_view_owner'), FALSE) AS owners_ok,
         COALESCE(BOOL_AND(api_can_select), FALSE) AS api_select_ok,
+        COALESCE(BOOL_AND(security_barrier_enabled), FALSE) AS security_barrier_ok,
         COALESCE(BOOL_AND(
             NOT owner_can_login
             AND NOT owner_is_superuser
@@ -461,7 +466,8 @@ SELECT
     (SELECT view_count FROM view_stats) AS approved_view_count,
     (SELECT owners_ok FROM view_stats) AS approved_view_owners_ok,
     (SELECT api_select_ok FROM view_stats) AS approved_view_select_ok,
-    (SELECT owner_attributes_ok FROM view_stats) AS view_owner_attributes_ok
+    (SELECT owner_attributes_ok FROM view_stats) AS view_owner_attributes_ok,
+    (SELECT security_barrier_ok FROM view_stats) AS approved_view_security_barrier_ok
 """
 
 
@@ -495,7 +501,7 @@ def validate_ro_database_identity(identity: Mapping[str, Any] | None) -> None:
 
 
 def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
-    """Fail closed unless the six-view / zero-base-table access boundary is proven."""
+    """Fail closed unless the fourteen-view / zero-base-table access boundary is proven."""
     if snapshot is None:
         raise RuntimeError("Cannot verify effective API database privileges.")
 
@@ -537,6 +543,8 @@ def validate_ro_database_privileges(snapshot: Mapping[str, Any] | None) -> None:
         raise RuntimeError("All approved API views must be owned by sireader_view_owner.")
     if snapshot.get("approved_view_select_ok") is not True:
         raise RuntimeError("sireader_api_ro must have SELECT on every approved API view.")
+    if snapshot.get("approved_view_security_barrier_ok") is not True:
+        raise RuntimeError("All approved API views must use security_barrier=true.")
     if snapshot.get("view_owner_attributes_ok") is not True:
         raise RuntimeError("sireader_view_owner role attributes violate the least-privilege policy.")
 

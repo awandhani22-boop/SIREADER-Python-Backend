@@ -33,6 +33,9 @@ class FakeDB:
 
 
 def setup_db(monkeypatch, db):
+    monkeypatch.setattr(cost_guard.settings, "AI_MODEL_FAST", "tokenmurah/claude-haiku-4-5-20251001")
+    monkeypatch.setattr(cost_guard.settings, "AI_MODEL_REASONING", "tokenmurah/claude-sonnet-4-6")
+    monkeypatch.setattr(cost_guard.settings, "AI_MODEL_ESCALATION", "tokenmurah/claude-opus-5")
     monkeypatch.setattr(cost_guard, "SessionLocal", lambda: db)
     monkeypatch.setattr(cost_guard, "_lock_budget", lambda session: None)
     monkeypatch.setattr(cost_guard, "current_usage_date", lambda: date(2026, 11, 3))

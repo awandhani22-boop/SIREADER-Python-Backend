@@ -115,6 +115,7 @@ class TaskCostBreakdownDTO(BaseModel):
 class BudgetObservabilityDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
     daily_idr: BudgetWindowDTO
+    daily_anthropic_usd: BudgetWindowDTO
     rolling_month_idr: BudgetWindowDTO
     monthly_anthropic_usd: BudgetWindowDTO
     idr_tiers: List[BudgetTierDTO]

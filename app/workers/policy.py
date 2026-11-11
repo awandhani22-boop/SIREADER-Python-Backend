@@ -12,9 +12,10 @@ from typing import Any
 from app.ai.sanitizer import REDACTED, mask_string, sanitize_review_payload
 from app.governance.review_policy import TRADING_RELATED_CAPABILITIES
 from app.workers.registry import CAPABILITY_CATALOG
+from app.workers.profiles import profile_for_worker
 from app.workers.runtime_contract import WorkerContract
 
-POLICY_VERSION = "2026.11.10"
+POLICY_VERSION = "2026.11.10-harness.1"
 
 class SensitiveTaskAction(StrEnum):
     ALLOW = "ALLOW"
@@ -43,6 +44,8 @@ CAPABILITY_MODEL_TIERS = {
     "complex_reasoning": "ESCALATION",
     "strategic_analysis": "ESCALATION",
     "deep_review": "ESCALATION",
+    # Shared capability: deterministic Decision Engineer uses NONE;
+    # only the Opus profile may use it through Anthropic.
     "decision_evaluation": "ESCALATION",
 }
 
@@ -124,6 +127,7 @@ def evaluate_workforce_policy(
     title: str,
     input_payload: dict[str, Any],
     provider_mode: str,
+    live_provider_enabled: bool = False,
 ) -> WorkforcePolicyDecision:
     """Validate capability, choose one deterministic tier, and scrub sensitive input.
 
@@ -131,7 +135,6 @@ def evaluate_workforce_policy(
     attempt's single provider request so UNKNOWN outcomes are never replayed elsewhere.
     """
     mode = str(provider_mode).strip().upper()
-    live_mode = mode == "OMNIROUTE"
     if required_capability not in CAPABILITY_CATALOG:
         return WorkforcePolicyDecision(
             POLICY_VERSION, SensitiveTaskAction.REJECT, "CAPABILITY_UNKNOWN", "NONE",
@@ -150,25 +153,58 @@ def evaluate_workforce_policy(
             "[REDACTED]", {}, False, 0,
         )
 
-    selected_tier = CAPABILITY_MODEL_TIERS.get(required_capability, "NONE")
-    if live_mode:
-        if worker.worker_id not in PROVIDER_WORKERS or worker.worker_id in PROVIDER_FORBIDDEN_WORKERS:
-            return WorkforcePolicyDecision(
-                POLICY_VERSION, SensitiveTaskAction.REJECT, "LIVE_PROVIDER_WORKER_FORBIDDEN", "NONE",
-                "[REDACTED]", {}, False, 0,
-            )
-        if required_capability in TRADING_RELATED_CAPABILITIES:
-            return WorkforcePolicyDecision(
-                POLICY_VERSION, SensitiveTaskAction.REJECT, "TRADING_CAPABILITY_PROVIDER_FORBIDDEN", "NONE",
-                "[REDACTED]", {}, False, 0,
-            )
-        ceiling = WORKER_TIER_CEILINGS[worker.worker_id]
-        if selected_tier == "NONE" or TIER_RANK[selected_tier] > TIER_RANK[ceiling] or worker.model_tier != ceiling:
-            return WorkforcePolicyDecision(
-                POLICY_VERSION, SensitiveTaskAction.REJECT, "MODEL_TIER_POLICY_REJECTED", "NONE",
-                "[REDACTED]", {}, False, 0,
-            )
-    elif mode != "MOCK":
+    try:
+        profile = profile_for_worker(worker.worker_id)
+    except ValueError:
+        return WorkforcePolicyDecision(
+            POLICY_VERSION, SensitiveTaskAction.REJECT, "WORKER_PROFILE_UNKNOWN", "NONE",
+            "[REDACTED]", {}, False, 0,
+        )
+
+    if worker.model_tier != profile.model_tier:
+        return WorkforcePolicyDecision(
+            POLICY_VERSION, SensitiveTaskAction.REJECT, "WORKER_PROFILE_TIER_MISMATCH", "NONE",
+            "[REDACTED]", {}, False, 0,
+        )
+
+    selected_tier = (
+        "NONE" if profile.execution_mode == "PYTHON"
+        else CAPABILITY_MODEL_TIERS.get(required_capability, "NONE")
+    )
+
+    if mode == "ANTHROPIC":
+        if profile.execution_mode == "PYTHON":
+            # Deterministic profiles must never be silently routed to a model.
+            if selected_tier != "NONE":
+                return WorkforcePolicyDecision(
+                    POLICY_VERSION, SensitiveTaskAction.REJECT, "PYTHON_PROFILE_AI_CAPABILITY_FORBIDDEN", "NONE",
+                    "[REDACTED]", {}, False, 0,
+                )
+        else:
+            if not live_provider_enabled:
+                return WorkforcePolicyDecision(
+                    POLICY_VERSION, SensitiveTaskAction.REJECT, "LIVE_PROVIDER_DISABLED", "NONE",
+                    "[REDACTED]", {}, False, 0,
+                )
+            if worker.worker_id not in PROVIDER_WORKERS or worker.worker_id in PROVIDER_FORBIDDEN_WORKERS:
+                return WorkforcePolicyDecision(
+                    POLICY_VERSION, SensitiveTaskAction.REJECT, "LIVE_PROVIDER_WORKER_FORBIDDEN", "NONE",
+                    "[REDACTED]", {}, False, 0,
+                )
+            if required_capability in TRADING_RELATED_CAPABILITIES:
+                return WorkforcePolicyDecision(
+                    POLICY_VERSION, SensitiveTaskAction.REJECT, "TRADING_CAPABILITY_PROVIDER_FORBIDDEN", "NONE",
+                    "[REDACTED]", {}, False, 0,
+                )
+            ceiling = WORKER_TIER_CEILINGS[worker.worker_id]
+            if selected_tier == "NONE" or TIER_RANK[selected_tier] > TIER_RANK[ceiling] or worker.model_tier != ceiling:
+                return WorkforcePolicyDecision(
+                    POLICY_VERSION, SensitiveTaskAction.REJECT, "MODEL_TIER_POLICY_REJECTED", "NONE",
+                    "[REDACTED]", {}, False, 0,
+                )
+    elif mode == "MOCK":
+        pass
+    else:
         return WorkforcePolicyDecision(
             POLICY_VERSION, SensitiveTaskAction.REJECT, "UNKNOWN_PROVIDER_MODE", "NONE",
             "[REDACTED]", {}, False, 0,

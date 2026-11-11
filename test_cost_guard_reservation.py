@@ -52,6 +52,9 @@ def fake_log(status="RESERVED"):
 
 
 def setup_fake_db(monkeypatch, db):
+    monkeypatch.setattr(cost_guard.settings, "AI_MODEL_FAST", "tokenmurah/claude-haiku-4-5-20251001")
+    monkeypatch.setattr(cost_guard.settings, "AI_MODEL_REASONING", "tokenmurah/claude-sonnet-4-6")
+    monkeypatch.setattr(cost_guard.settings, "AI_MODEL_ESCALATION", "tokenmurah/claude-opus-5")
     monkeypatch.setattr(
         cost_guard,
         "SessionLocal",

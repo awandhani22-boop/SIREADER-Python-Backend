@@ -7,6 +7,9 @@ class Settings(BaseSettings):
 
     # DATABASE
     DATABASE_URL: str
+    # Separate least-privilege database login for the generic workforce runtime.
+    # Required for ANTHROPIC/other LIVE worker execution; never fall back to DATABASE_URL.
+    WORKER_DATABASE_URL: str | None = None
 
     # TELEGRAM
     TELEGRAM_API_ID: int
@@ -37,38 +40,36 @@ class Settings(BaseSettings):
     # Tetap OFF sampai validasi timestamp MT5 selesai.
     TRADE_DECISION_WATCH_ENABLED: bool = False
 
-    # OMNIROUTE
-    AI_PROVIDER: str = "omniroute"
+    # OFFICIAL ANTHROPIC API — shared server-side gateway
+    AI_PROVIDER: str = "anthropic"
+    ANTHROPIC_API_KEY: str | None = None
+    # Backward-compatible secret alias; prefer ANTHROPIC_API_KEY.
     AI_API_KEY: str | None = None
-    AI_BASE_URL: str = "http://127.0.0.1:20128/v1"
+    AI_BASE_URL: str = "https://api.anthropic.com"
+    ANTHROPIC_API_VERSION: str = "2023-06-01"
     AI_TIMEOUT_SECONDS: int = 120
+    AI_ALLOW_INSECURE_TEST_ENDPOINT: bool = False
+    AI_PROMPT_CACHING_ENABLED: bool = True
+    AI_PROMPT_CACHE_TTL: str = "5m"
 
-    # AI MODEL 1: FAST
-    AI_MODEL_FAST: str = (
-        "tokenmurah/claude-haiku-4-5-20251001"
-    )
-    AI_MAX_OUTPUT_FAST: int = 350
-
-    # AI MODEL 2: REASONING
-    AI_MODEL_REASONING: str = (
-        "tokenmurah/claude-sonnet-4-6"
-    )
-    AI_MAX_OUTPUT_REASONING: int = 1200
-
-    # AI MODEL 3: ESCALATION
-    AI_MODEL_ESCALATION: str = (
-        "tokenmurah/claude-opus-5"
-    )
-    AI_MAX_OUTPUT_ESCALATION: int = 800
+    # Official Anthropic model IDs and agreed max output ceilings.
+    AI_MODEL_FAST: str = "claude-haiku-5-5"
+    AI_MAX_OUTPUT_FAST: int = 700
+    AI_MODEL_REASONING: str = "claude-sonnet-5-5"
+    AI_MAX_OUTPUT_REASONING: int = 1400
+    AI_MODEL_ESCALATION: str = "claude-opus-5-5"
+    AI_MAX_OUTPUT_ESCALATION: int = 1800
 
     # DAILY AI BUDGET
     AI_TARGET_DAILY_BUDGET_RP: int = 10000
     AI_HARD_DAILY_LIMIT_RP: int = 50000
 
-    # ANTHROPIC USD BILLING (trial Claude Console melalui OmniRoute)
-    # Budget IDR di atas tetap berlaku untuk provider TokenMurah.
-    # Budget USD di bawah berlaku untuk model berprefix "anthropic/".
+    # ANTHROPIC OFFICIAL USD BILLING
+    # Direct Anthropic model IDs are billed and accounted for in USD.
+    # Legacy anthropic/ prefixed IDs remain recognized for historical compatibility.
     AI_ANTHROPIC_MODEL_PREFIX: str = "anthropic/"
+    # Zero disables paid Anthropic inference until an owner-approved daily cap is configured.
+    AI_ANTHROPIC_DAILY_BUDGET_USD: Decimal = Decimal("0.00")
     AI_ANTHROPIC_MONTHLY_BUDGET_USD: Decimal = Decimal("5.00")
     AI_ANTHROPIC_WARNING_THRESHOLDS: str = "0.70,0.85,0.95"
     AI_ANTHROPIC_LONG_CONTEXT_TOKENS: int = 100000
@@ -110,8 +111,10 @@ class Settings(BaseSettings):
     AI_PIPELINE_ENABLED: bool = False
     AI_DEBOUNCE_SECONDS: float = 5.0
 
-    # GENERIC WORKER RUNTIME — fail-closed defaults (Phase 4)
+    # CENTRAL WORKER HARNESS — fail-closed defaults
     WORKER_RUNTIME_ENABLED: bool = False
+    # MOCK is deterministic/offline. ANTHROPIC enables Python profiles and
+    # allows AI profiles only when WORKER_LIVE_PROVIDER_ENABLED is also true.
     WORKER_PROVIDER_MODE: str = "MOCK"
     WORKER_LIVE_PROVIDER_ENABLED: bool = False
     WORKER_MAX_TASK_COST_RP: Decimal = Decimal("0")
@@ -120,6 +123,7 @@ class Settings(BaseSettings):
     WORKER_TASK_MAX_ATTEMPTS: int = 3
     WORKER_TASK_LEASE_SECONDS: int = 150
     WORKER_HEARTBEAT_TIMEOUT_SECONDS: int = 60
+    WORKER_MARKET_DATA_MAX_AGE_SECONDS: int = 30
 
     # TOKENMURAH PRICING
     # Semua tarif dalam Rupiah per 1 juta token.

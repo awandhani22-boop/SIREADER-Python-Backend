@@ -3,7 +3,7 @@ import json
 from decimal import Decimal
 
 from app.config import settings
-from app.ai.omniroute_client import call_ai
+from app.ai.provider_gateway import call_ai
 from app.ai.cost_guard import (
     BudgetExceededError,
     CURRENCY_USD,
@@ -1300,7 +1300,7 @@ def _attempt_record(tier, response):
         "model": analysis.get("model"),
         "billing_currency": analysis.get(
             "billing_currency",
-            "IDR",
+            "USD",
         ),
         "cost": str(
             analysis.get(
@@ -1363,6 +1363,48 @@ def _final_analysis_status(analysis):
     )
 
 
+def _bundle_is_pure_commentary(bundle):
+    """Skip model inference only when every item is explicitly safe commentary.
+
+    Missing/unknown roles, replies, edits, episode links, or any trade role fail
+    open to AI. Historical Telegram content is never deleted by this filter.
+    """
+    items = bundle.get("messages") if isinstance(bundle, dict) else None
+    if not isinstance(items, list) or not items:
+        return False
+    for item in items:
+        if not isinstance(item, dict):
+            return False
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return False
+        if item.get("reply_to_id") is not None:
+            return False
+        if item.get("trade_episode_id") or item.get("trade_episode_status"):
+            return False
+        if item.get("edit_history") or item.get("is_edited"):
+            return False
+        roles = item.get("message_roles")
+        if not isinstance(roles, list):
+            role = item.get("message_role")
+            roles = [role] if isinstance(role, str) else []
+        if roles != ["COMMENTARY"]:
+            return False
+    return True
+
+
+def _output_limit_result(tier, attempts, previous_analysis=None):
+    """Fail closed on truncated JSON; a partial model response is never executable."""
+    return {
+        "status": "MANUAL_REVIEW",
+        "reason": "MODEL_OUTPUT_LIMIT_REACHED",
+        "truncated_tier": tier,
+        "final_analysis": previous_analysis,
+        "attempts": attempts,
+        "partial_output_is_authoritative": False,
+    }
+
+
 def analyze_bundle(
     bundle,
     resume_state=None,
@@ -1374,6 +1416,36 @@ def analyze_bundle(
     Resume hanya melanjutkan tier yang belum berhasil.
     Tier yang sudah berhasil tidak dipanggil ulang.
     """
+
+    if resume_state is None and _bundle_is_pure_commentary(bundle):
+        return {
+            "status": "NO_SIGNAL",
+            "final_analysis": {
+                "status": "NO_SIGNAL",
+                "confidence": 1.0,
+                "needs_reasoning": False,
+                "needs_escalation": False,
+                "critical_ambiguity": False,
+                "summary": "Python prefilter: all messages were explicitly classified as pure commentary.",
+                "extracted": {
+                    "direction": None,
+                    "entry_zone_text": None,
+                    "explicit_entry_text": None,
+                    "stop_loss_text": None,
+                    "take_profit_texts": [],
+                    "conditions": [],
+                    "action_instructions": [],
+                },
+                "evidence": [],
+                "uncertainties": [],
+            },
+            "attempts": [],
+            "routing": {
+                "mode": "PYTHON_FILTER",
+                "reason_code": "PURE_COMMENTARY",
+                "model_calls": 0,
+            },
+        }
 
     prepared = prepare_bundle(bundle)
     _validate_resume_state(resume_state)
@@ -1439,6 +1511,9 @@ def analyze_bundle(
                 fast_response,
             )
         )
+
+        if fast_response["analysis"].get("finish_reason") == "max_tokens":
+            return _output_limit_result("FAST", attempts)
 
         # FAST refusal: jalur fallback khusus.
         if _is_model_refusal(fast_content):
@@ -1588,6 +1663,9 @@ def analyze_bundle(
             )
         )
 
+        if sonnet_response["analysis"].get("finish_reason") == "max_tokens":
+            return _output_limit_result("REASONING", attempts, previous_analysis=fast)
+
         if _is_model_refusal(sonnet_content):
 
             return _refused_result(
@@ -1713,6 +1791,9 @@ def analyze_bundle(
                 opus_response,
             )
         )
+
+        if opus_response["analysis"].get("finish_reason") == "max_tokens":
+            return _output_limit_result("ESCALATION", attempts, previous_analysis=sonnet)
 
         if _is_model_refusal(opus_content):
 

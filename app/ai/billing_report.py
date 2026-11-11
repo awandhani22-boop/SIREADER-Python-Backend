@@ -20,6 +20,7 @@ from app.ai.cost_guard import (
 )
 from app.database.connection import SessionLocal
 from app.database.models import AIUsageLog
+from app.workers.models import WorkTaskAttemptRecord
 
 
 def _currency_filter(currency):
@@ -198,6 +199,119 @@ def get_analysis_report(currency=CURRENCY_USD, period_days=None, limit=50):
     }
 
 
+def get_worker_report(currency=CURRENCY_USD, period_days=None):
+    """Report biaya per worker dan task via persisted provider-request correlation.
+
+    Worker task attempts store the same internal request ID as AIUsageLog.request_id.
+    This avoids adding a duplicate worker/task column or requiring a schema migration.
+    Non-worker pipeline usage is grouped under worker_id=None and task_id=None.
+    """
+    currency = str(currency).upper()
+    cost_col, reserved_col = _cost_columns(currency)
+    usage_date = current_usage_date()
+    period_days = int(period_days or settings.AI_BUDGET_PERIOD_DAYS)
+    start = usage_date - timedelta(days=period_days - 1)
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(
+                WorkTaskAttemptRecord.worker_id,
+                WorkTaskAttemptRecord.task_id,
+                func.count(AIUsageLog.id),
+                func.coalesce(func.sum(cost_col), 0),
+                func.coalesce(func.sum(reserved_col), 0),
+                func.coalesce(func.sum(AIUsageLog.input_tokens), 0),
+                func.coalesce(func.sum(AIUsageLog.output_tokens), 0),
+                func.coalesce(func.sum(AIUsageLog.cache_read_tokens), 0),
+                func.coalesce(func.sum(AIUsageLog.cache_write_tokens), 0),
+            )
+            .select_from(AIUsageLog)
+            .outerjoin(
+                WorkTaskAttemptRecord,
+                WorkTaskAttemptRecord.provider_request_id == AIUsageLog.request_id,
+            )
+            .where(
+                AIUsageLog.usage_date >= start,
+                AIUsageLog.usage_date <= usage_date,
+                _currency_filter(currency),
+            )
+            .group_by(WorkTaskAttemptRecord.worker_id, WorkTaskAttemptRecord.task_id)
+            .order_by(func.coalesce(func.sum(cost_col), 0).desc())
+        ).all()
+
+    workers = {}
+    tasks = []
+    for row in rows:
+        worker_id, task_id = row[0], row[1]
+        requests = int(row[2])
+        actual = Decimal(str(row[3] or 0))
+        reserved = Decimal(str(row[4] or 0))
+        totals = {
+            "requests": requests,
+            "actual_cost": actual,
+            "reserved_cost": reserved,
+            "input_tokens": int(row[5] or 0),
+            "output_tokens": int(row[6] or 0),
+            "cache_read_tokens": int(row[7] or 0),
+            "cache_write_tokens": int(row[8] or 0),
+        }
+        key = worker_id or "PIPELINE_OR_UNLINKED"
+        aggregate = workers.setdefault(key, {
+            "worker_id": worker_id,
+            "requests": 0,
+            "actual_cost": Decimal("0"),
+            "reserved_cost": Decimal("0"),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "task_count": 0,
+        })
+        for field in (
+            "requests", "actual_cost", "reserved_cost", "input_tokens",
+            "output_tokens", "cache_read_tokens", "cache_write_tokens",
+        ):
+            aggregate[field] += totals[field]
+        if worker_id is not None and task_id is not None:
+            aggregate["task_count"] += 1
+        tasks.append({
+            "worker_id": worker_id,
+            "task_id": task_id,
+            "requests": requests,
+            "actual_cost": _money(actual),
+            "reserved_cost": _money(reserved),
+            "tokens": {
+                "input": totals["input_tokens"],
+                "output": totals["output_tokens"],
+                "cache_read": totals["cache_read_tokens"],
+                "cache_write": totals["cache_write_tokens"],
+            },
+        })
+
+    for aggregate in workers.values():
+        aggregate["actual_cost"] = _money(aggregate["actual_cost"])
+        aggregate["reserved_cost"] = _money(aggregate["reserved_cost"])
+        aggregate["tokens"] = {
+            "input": aggregate.pop("input_tokens"),
+            "output": aggregate.pop("output_tokens"),
+            "cache_read": aggregate.pop("cache_read_tokens"),
+            "cache_write": aggregate.pop("cache_write_tokens"),
+        }
+
+    return {
+        "currency": currency,
+        "period_start": start.isoformat(),
+        "period_end": usage_date.isoformat(),
+        "period_days": period_days,
+        "workers": sorted(
+            workers.values(),
+            key=lambda item: item["actual_cost"],
+            reverse=True,
+        ),
+        "tasks": tasks,
+    }
+
+
 def get_projection_report(period_days=None):
     """Proyeksi 30 hari dari laju pemakaian aktual. Estimasi, bukan tagihan."""
     usage_date = current_usage_date()
@@ -275,6 +389,7 @@ def get_full_report(period_days=None):
             "summary": get_currency_summary(CURRENCY_USD, period_days),
             "by_model": get_model_report(CURRENCY_USD, period_days),
             "by_analysis": get_analysis_report(CURRENCY_USD, period_days),
+            "by_worker": get_worker_report(CURRENCY_USD, period_days),
         },
         "projection": get_projection_report(period_days),
         "period_start": current_period_start().isoformat(),

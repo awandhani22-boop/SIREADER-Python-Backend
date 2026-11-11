@@ -51,6 +51,9 @@ def db_factory(monkeypatch):
     monkeypatch.setattr(
     billing_report, "current_usage_date", lambda: date(2026, 11, 4)
      )
+    monkeypatch.setattr(
+        cost_guard.settings, "AI_ANTHROPIC_DAILY_BUDGET_USD", Decimal("5.00")
+    )
     yield factory
     Base.metadata.drop_all(engine)
     engine.dispose()
@@ -583,3 +586,51 @@ def test_laporan_tanpa_data_tidak_mengarang(db_factory):
     projection = billing_report.get_projection_report()
     assert projection["USD"]["confidence"] == "NO_DATA"
     assert projection["USD"]["projected_cost_30d"] == Decimal("0")
+
+
+def test_hard_daily_anthropic_usd_cap_blocks_reservation(db_factory, monkeypatch):
+    monkeypatch.setattr(
+        cost_guard.settings, "AI_ANTHROPIC_DAILY_BUDGET_USD", Decimal("0.000500")
+    )
+    _add_usage(
+        db_factory,
+        cost_usd=Decimal("0.000499"),
+        request_id="daily-usd-near-cap",
+    )
+
+    with pytest.raises(cost_guard.BudgetExceededError, match="daily Anthropic USD"):
+        cost_guard.reserve_ai_request(
+            tier="FAST",
+            prompt_text="x",
+            max_output_tokens=100,
+            request_id="daily-usd-over-cap",
+            model=HAIKU,
+        )
+
+
+def test_zero_daily_anthropic_usd_cap_fails_closed(db_factory, monkeypatch):
+    monkeypatch.setattr(
+        cost_guard.settings, "AI_ANTHROPIC_DAILY_BUDGET_USD", Decimal("0")
+    )
+    with pytest.raises(cost_guard.BudgetExceededError, match="belum diotorisasi"):
+        cost_guard.reserve_ai_request(
+            tier="FAST",
+            prompt_text="synthetic",
+            max_output_tokens=100,
+            request_id="daily-usd-disabled",
+            model=HAIKU,
+        )
+
+
+def test_anthropic_usage_reports_daily_actual_and_reserved_usd(db_factory):
+    _add_usage(
+        db_factory,
+        cost_usd=Decimal("0.10"),
+        reserved_usd=Decimal("0.05"),
+        request_id="daily-usd-report",
+    )
+    report = cost_guard.get_anthropic_usage()
+    assert report["daily_budget_enabled"] is True
+    assert report["daily_actual_cost_usd"] == Decimal("0.100000")
+    assert report["daily_reserved_cost_usd"] == Decimal("0.050000")
+    assert report["daily_projected_cost_usd"] == Decimal("0.150000")
