@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+import sys
 from uuid import uuid4
+
+# Make the backend root importable when this PG17-only script is invoked by path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker

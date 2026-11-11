@@ -142,3 +142,18 @@ The following items remain release gates, not reasons to add duplicate command s
 5. Explicit production approval before any migration, role/login creation, runtime configuration change or LIVE enablement.
 
 No production database, credential, URL, runtime flag, AI provider, Telegram listener, MT5/HFM connection, or trading execution was changed or enabled. The staging cluster is stopped after testing; its local files and certificates are retained.
+
+## Superseding local staging remediation update — 2026-11-11
+
+The critical findings in this static review are now addressed in the isolated worker-command staging implementation, but are not thereby approved for production deployment:
+
+- Direct ORM worker lifecycle writes have been replaced in the runtime path by the narrow database command adapter for the staged worker operations.
+- Completion is bound to the authenticated worker, exact task/attempt and active lease; review quarantine, event actor integrity and normal result release are exercised by the PG17.11 staging SQL acceptance.
+- Provider reservation rejects trading-related capabilities and is executable only by Haiku, Sonnet and Opus worker permission roles.
+- LIVE source/billing provenance is checked against the persisted provider reservation, worker class and USD billing fields. This is database consistency validation, not cryptographic attestation of provider response or invoice authenticity.
+- SECURITY DEFINER retention authorization now uses session_user rather than current_user. Transactional tests demonstrate non-maintenance rejection and maintenance-only purge.
+- The policy catalog and review decision function are synchronized with Python: 40 rules, 56 capability/task pairs and 1,120 deterministic comparisons pass.
+
+See WORKER_DATABASE_SECURITY_REVIEW_CLOSEOUT_2026-11-11.md and WORKER_DATABASE_COMMAND_LAYER_STAGING_ACCEPTANCE_2026-11-11.md for complete evidence.
+
+The following earlier findings remain valid release blockers for production: dedicated production login/pooler identities and credentials, separate bounded production maintenance operations, Command API and review-operator function boundaries, production-specific forward/rollback migrations, managed-Supabase-equivalent staging, production backup/recovery and change-window approval. No production DDL or credentials were created; WORKER_DATABASE_URL remains unset. Limited LIVE rollout remains NOT AUTHORIZED and v1.0 NOT RELEASED.

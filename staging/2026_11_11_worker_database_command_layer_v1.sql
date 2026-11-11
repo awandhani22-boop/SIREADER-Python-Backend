@@ -841,6 +841,13 @@ BEGIN
     IF v_attempt.worker_id NOT IN ('haiku','sonnet','opus') THEN
         RAISE EXCEPTION 'This worker identity is not permitted to reserve a model provider slot';
     END IF;
+    IF v_task.required_capability IN (
+        'rule_validation','decision_evaluation','risk_assessment_simulation',
+        'decision_consistency_checks','market_monitoring_simulation',
+        'market_condition_detection','anomaly_detection_simulation','market_event_reporting'
+    ) THEN
+        RAISE EXCEPTION 'Trading-related capabilities are not eligible for AI provider dispatch';
+    END IF;
     IF v_task.status <> 'RUNNING' OR v_attempt.status <> 'STARTED' THEN
         RAISE EXCEPTION 'Provider reservation requires a RUNNING task and STARTED attempt';
     END IF;
@@ -892,6 +899,8 @@ DECLARE
     v_review_id text;
     v_review_payload jsonb;
     v_hash text;
+    v_source text;
+    v_expected_tier text;
     v_context jsonb := COALESCE(p_policy_context,'{}'::jsonb);
 BEGIN
     PERFORM sireader_workforce_private.lock_worker_lease_v1(p_worker_id,p_instance_id,p_task_id,p_lease_token);
@@ -904,6 +913,36 @@ BEGIN
        OR pg_catalog.octet_length(sireader_workforce_private.canonical_json_v1(p_result_payload)) > 65536 THEN
         RAISE EXCEPTION 'Task result payload must be a JSON object no larger than 64 KiB';
     END IF;
+
+    -- Persisted provenance is database-validated, not caller-authored telemetry.
+    v_source := p_result_payload->>'source';
+    IF v_source IS NULL OR v_source NOT IN ('LIVE','PYTHON','SIMULATED') THEN
+        RAISE EXCEPTION 'Task result source must be an explicit supported provenance value';
+    END IF;
+    IF v_attempt.status = 'PROVIDER_REQUESTED' THEN
+        IF v_source <> 'LIVE'
+           OR v_attempt.provider_request_id IS NULL
+           OR p_billing_currency IS DISTINCT FROM 'USD'
+           OR p_cost_amount IS NULL
+           OR v_attempt.worker_id NOT IN ('haiku','sonnet','opus') THEN
+            RAISE EXCEPTION 'LIVE result provenance requires a reserved AI request and USD billing';
+        END IF;
+    ELSE
+        IF v_source = 'LIVE'
+           OR p_billing_currency IS NOT NULL
+           OR p_cost_amount IS NOT NULL THEN
+            RAISE EXCEPTION 'Unreserved task completion cannot claim LIVE provenance or provider billing';
+        END IF;
+    END IF;
+    IF v_source = 'PYTHON'
+       AND v_attempt.worker_id NOT IN ('supervisor','decision_engineer','market_monitor','data_archivist') THEN
+        RAISE EXCEPTION 'PYTHON provenance is restricted to deterministic Python worker profiles';
+    END IF;
+    IF v_source = 'LIVE'
+       AND v_attempt.worker_id NOT IN ('haiku','sonnet','opus') THEN
+        RAISE EXCEPTION 'LIVE provenance is restricted to approved AI worker profiles';
+    END IF;
+
     IF p_billing_currency IS NOT NULL AND p_billing_currency NOT IN ('IDR','USD') THEN
         RAISE EXCEPTION 'Billing currency must be IDR or USD';
     END IF;
@@ -916,14 +955,44 @@ BEGIN
                   WHERE key NOT IN ('policy_version','sensitive_action','model_tier','reason_code','redacted_fields')) THEN
         RAISE EXCEPTION 'Policy context has an invalid shape or exceeds 16 KiB';
     END IF;
+    IF v_context->>'policy_version' IS DISTINCT FROM '2026.11.10-harness.1'
+       OR v_context->>'sensitive_action' IS NULL
+       OR v_context->>'sensitive_action' NOT IN ('ALLOW','REDACT','REVIEW')
+       OR v_context->>'reason_code' IS NULL
+       OR v_context->>'reason_code' NOT IN (
+           'POLICY_ALLOWED','CREDENTIALS_REDACTED','SENSITIVE_PERSONAL_DATA_REVIEW'
+       )
+       OR v_context->>'model_tier' IS NULL THEN
+        RAISE EXCEPTION 'Worker policy provenance is missing, unknown, or unsupported';
+    END IF;
+    v_expected_tier := CASE v_attempt.worker_id
+        WHEN 'haiku' THEN 'FAST'
+        WHEN 'sonnet' THEN 'REASONING'
+        WHEN 'opus' THEN 'ESCALATION'
+        ELSE 'NONE'
+    END;
+    IF v_context->>'model_tier' IS DISTINCT FROM v_expected_tier THEN
+        RAISE EXCEPTION 'Worker policy model tier does not match its registered profile';
+    END IF;
     IF v_context ? 'redacted_fields'
        AND (v_context->>'redacted_fields') !~ '^[0-9]{1,9}$' THEN
         RAISE EXCEPTION 'Policy context redacted_fields must be a non-negative integer';
     END IF;
+    IF (v_context->>'sensitive_action' = 'ALLOW'
+        AND (v_context->>'reason_code' <> 'POLICY_ALLOWED'
+             OR COALESCE((v_context->>'redacted_fields')::integer,0) <> 0))
+       OR (v_context->>'sensitive_action' = 'REDACT'
+        AND v_context->>'reason_code' <> 'CREDENTIALS_REDACTED')
+       OR (v_context->>'sensitive_action' = 'REVIEW'
+        AND (v_context->>'reason_code' <> 'SENSITIVE_PERSONAL_DATA_REVIEW'
+             OR COALESCE((v_context->>'redacted_fields')::integer,0) < 1)) THEN
+        RAISE EXCEPTION 'Worker policy action, reason, and redaction count are inconsistent';
+    END IF;
 
     v_requires_review := sireader_workforce_private.requires_review_v1(
         v_task.required_capability,v_task.task_type,v_task.task_id,v_task.title,v_task.input_payload
-    ) OR sireader_workforce_private.contains_personal_data_v1(p_result_payload);
+    ) OR sireader_workforce_private.contains_personal_data_v1(p_result_payload)
+      OR (v_source = 'LIVE' AND COALESCE((p_result_payload->>'output_truncated')::boolean,false));
     IF v_requires_review THEN
         v_review_payload := sireader_workforce_private.sanitize_review_payload_v1(p_result_payload);
         IF pg_catalog.octet_length(sireader_workforce_private.canonical_json_v1(v_review_payload)) > 65536 THEN
@@ -960,6 +1029,9 @@ BEGIN
             pg_catalog.jsonb_build_object(
                 'review_id',v_review_id,'original_output_sha256',v_hash,
                 'trigger_reason',CASE
+                    WHEN v_source = 'LIVE'
+                         AND COALESCE((p_result_payload->>'output_truncated')::boolean,false)
+                    THEN 'OUTPUT_TRUNCATED_REVIEW'
                     WHEN sireader_workforce_private.contains_personal_data_v1(v_task.input_payload)
                          OR v_task.title ~* '\m[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\M'
                     THEN 'SENSITIVE_PERSONAL_DATA_REVIEW'
@@ -983,7 +1055,7 @@ BEGIN
         'TASK_COMPLETED',v_attempt.worker_id,v_task.task_id,v_attempt.attempt_id,
         v_task.correlation_id,
         pg_catalog.jsonb_build_object(
-            'source',COALESCE(p_result_payload->>'source','LIVE'),
+            'source',v_source,
             'requires_review',v_requires_review,
             'policy_version',COALESCE(v_context->>'policy_version','2026.11.10-harness.1'),
             'sensitive_action',COALESCE(v_context->>'sensitive_action','ALLOW'),
@@ -1108,7 +1180,8 @@ BEGIN
            AND NEW.payload_purged_at IS NOT NULL
            AND NEW.payload_expires_at IS NOT NULL
            AND NEW.payload_expires_at <= pg_catalog.clock_timestamp()
-           AND current_user IN ('sireader_workforce_fn_owner','sireader_workforce_maint','postgres') THEN
+           AND pg_catalog.split_part(session_user::text, '.', 1)
+               IN ('sireader_workforce_maint','postgres') THEN
             RETURN NEW;
         END IF;
         RAISE EXCEPTION 'Task result may only be cleared by an authorized retention boundary';

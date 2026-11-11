@@ -264,3 +264,18 @@ This does not implement any command contract in this document. SQL worker/mainte
 The SQL implementation and application adapter are no longer NOT STARTED for the isolated staging boundary described by this contract. The implementation is located separately at backend/staging/2026_11_11_worker_database_command_layer_v1.sql with its transactional acceptance script and Python adapter smoke test. It was applied and tested only on loopback PostgreSQL 17.11 database sireader_stage. The eight worker command functions and seven NOLOGIN worker permission roles passed the staging acceptance recorded in WORKER_DATABASE_COMMAND_LAYER_STAGING_ACCEPTANCE_2026-11-11.md.
 
 This supersedes only the design-time SQL/adapter status above. The staged SQL is deliberately target-guarded and is NOT a production migration. Production login provisioning, production-specific migration/rollback, independent security approval, and bounded LIVE authorization remain NOT APPROVED.
+
+## Superseding Phase 7.4 implementation and review status — 2026-11-11
+
+The earlier design-time M2/M5/M7 statements above are historical and are superseded for the isolated worker command boundary:
+
+- The eight ordinary worker command functions and Python database command adapter are implemented in the staging-only SQL artifact and app/workers/database_commands.py.
+- Seven NOLOGIN/NOINHERIT worker permission roles map database session identities to immutable worker IDs. Worker roles have no direct workforce base-table grants.
+- PG17.11 isolated staging SQL acceptance and Python adapter integration passed; all synthetic task transactions were rolled back.
+- Follow-up security remediations reject trading-related provider reservations, require persisted provider reservation and USD billing for LIVE provenance, validate worker profile/model/policy metadata, quarantine truncated LIVE outputs, and enforce maintenance purge identity using session_user.
+- Python and PostgreSQL review-policy catalog/decision parity passed for 40 rules, 56 capability/task pairs and 1,120 deterministic decision comparisons.
+- Effective staged ACL/RLS audit passed: all nine workforce tables have RLS enabled, worker permission roles have zero direct base-table privileges, SECURITY DEFINER functions use a fixed pg_catalog search_path, and PUBLIC EXECUTE is revoked.
+
+The implementation remains a local staging acceptance artifact, not a deployable production migration. It does not implement or approve the full production maintenance, Command API, or review-operator database command surfaces. Production LOGIN/pooler identity creation, managed-Supabase-specific migration and rollback, backup/recovery approval, read-only API cutover and fresh limited-LIVE authorization remain open. The earlier architecture role contract remains the target for those separate trust boundaries.
+
+Evidence and findings: backend/docs/WORKER_DATABASE_SECURITY_REVIEW_CLOSEOUT_2026-11-11.md and WORKER_DATABASE_COMMAND_LAYER_STAGING_ACCEPTANCE_2026-11-11.md.

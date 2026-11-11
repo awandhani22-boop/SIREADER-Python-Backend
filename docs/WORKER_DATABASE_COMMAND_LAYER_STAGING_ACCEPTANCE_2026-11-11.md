@@ -131,3 +131,43 @@ After the adapter wiring, per-worker login validation, numeric cost binding and 
 - Python-to-PG17 adapter integration: passed.
 
 The production build reports a non-blocking large JavaScript chunk warning (1,511.12 kB minified; 405.35 kB gzip). No bundle-splitting refactor was added because it is unrelated to the worker database security boundary.
+
+## Security-review closeout addendum — 2026-11-11
+
+This addendum supersedes earlier open findings for the isolated worker command-layer staging implementation only. The separate production deployment gates remain open.
+
+### Remediations added after the original staging acceptance
+
+- Provider reservation rejects the trading-related capability allowlist before acquiring the global provider slot. The negative test confirms an Opus DECISION_EVALUATION task cannot reserve a provider slot.
+- Completion requires an explicit source and validates LIVE provenance against a persisted PROVIDER_REQUESTED attempt, provider request ID, approved AI worker identity, USD billing currency and non-null cost. Unreserved completion cannot claim LIVE or provider billing.
+- Completion validates policy version, action/reason consistency, redacted-field count and the worker's fixed model tier (Haiku FAST, Sonnet REASONING, Opus ESCALATION, deterministic Python workers NONE).
+- A LIVE result marked output_truncated is forced into PENDING human-review quarantine; its audit event records OUTPUT_TRUNCATED_REVIEW.
+- The result-retention trigger now checks authenticated session_user rather than SECURITY DEFINER current_user. A transactional negative/positive test proves non-maintenance rejection and maintenance-only purge.
+- Added a read-only Python/PostgreSQL policy parity runner.
+
+### Final local acceptance results
+
+- PG17.11 sireader_stage at 127.0.0.1:55439, TLS 1.3.
+- Python review-policy catalog: 40/40 rules equal.
+- Capability/task pairs: 56; deterministic decision comparisons: 1,120 passed; unknown capability fails closed.
+- Worker SQL command acceptance: STAGING_WORKER_COMMAND_LAYER_TESTS_PASS. All synthetic fixture writes and temporary test roles/policies were rolled back.
+- Python adapter smoke: PYTHON_DATABASE_COMMAND_ADAPTER_PG17_PASS; contract lookup, heartbeat, claim, start and completion ran in a transaction rolled back at the end.
+- Worker adapter unit tests: 7 passed.
+- Backend full suite: 670 passed, 47 skipped, 0 failed; compileall passed. The 47 skips require a separately configured SIREADER_TEST_POSTGRES_URL; they are not counted as passed PG integration tests. The explicit PG17 command-layer SQL and adapter checks above were run separately and passed.
+- Virtual Office: 422 passed; TypeScript check and production build passed (existing non-blocking large-bundle warning).
+
+### Final effective privilege audit
+
+- All seven worker permission roles and the NOLOGIN function owner were non-superuser, NOINHERIT, non-BYPASSRLS and had no role memberships.
+- All nine workforce base tables had RLS enabled, with two policies each in the isolated staging restore.
+- Worker permission roles had zero direct SELECT/INSERT/UPDATE/DELETE privileges on the public workforce base tables.
+- Worker lifecycle commands were accessible only through the narrow private-schema functions; the functions bind calls to authenticated session_user identity and the corresponding worker principal.
+- Provider reservation EXECUTE was granted only to Haiku, Sonnet and Opus.
+- All 18 private-schema functions were owned by the NOLOGIN function owner; SECURITY DEFINER functions used search_path=pg_catalog; no function exposed PUBLIC EXECUTE.
+- The Command API and read-only API did not receive worker provider-reservation authority. The read-only API could not execute worker claim.
+
+### Staging cleanup
+
+A custom-format local backup was taken before updating the staging SQL. After the tests, the PostgreSQL 17.11 staging process was stopped, port 55439 was verified closed, temporary HBA configuration was removed, and transaction-created test fixtures/roles/policies were confirmed absent.
+
+**Disposition:** the worker command boundary and policy parity pass the local staging security review with the remediations above. This is not a production migration or hosted-Supabase acceptance. Production worker/maintenance/command/review identities, production forward/rollback migration, managed-platform staging, backup/recovery approval, API cutover and fresh limited-LIVE authorization remain OPEN/BLOCKED. SIREADER Virtual Office v1.0 remains NOT RELEASED.
