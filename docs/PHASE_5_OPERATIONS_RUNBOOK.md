@@ -220,3 +220,79 @@ This section supersedes earlier operational-status notes in this runbook where t
 
 - Reinitialized a fresh PostgreSQL 16.6 test cluster and empty `sireader_test` database on isolated loopback port 55432. The privilege/security fixture preflight passed 20/20; the subsequent complete backend `tests/` suite passed **229 passed, 0 failed, 0 skipped** (one Starlette/httpx deprecation warning).
 - The test cluster was gracefully stopped and both temporary test data directories were removed. Port 55432 is free. No application database or Supabase LIVE target was modified.
+
+
+## Phase 7.1 — Offline worker runtime assurance — 2026-11-10
+
+Added a dedicated worker unit-test suite:
+- `tests/workers/test_provider_unit.py` verifies deterministic MOCK output, cancellation, provider factory switches, credential and model-tier guards, zero per-task cap rejection, fake OmniRoute success parsing, and UNKNOWN handling for missing usage.
+- `tests/workers/test_policy_unit.py` verifies capability/task matching, personal-data review, private-key/trading-instruction rejection, allowed provider roles, and tier ceilings.
+- `tests/workers/test_runtime_guards.py` verifies that a disabled worker runtime fails before any heartbeat/database side effect and rejects invalid polling intervals before process startup.
+- `tests/workers/test_runtime_mock_flow.py` exercises the actual `run_worker_once` orchestration with fake DB sessions and the real deterministic `MockWorkerProvider`; it verifies a SIMULATED completion, empty queue behavior and rejection of a trade instruction before provider creation.
+- `tests/workers/conftest.py` supplies process-local synthetic settings. The worker unit tests do not load real `.env` secrets and do not establish a DB connection.
+
+Verification (2026-11-10): 31 new focused tests passed; full local backend suite **216 passed, 44 skipped, 0 failed**. Existing PostgreSQL integration tests were skipped because `SIREADER_TEST_POSTGRES_URL` was not set. One existing Starlette/httpx deprecation warning remains.
+
+No OS worker process was started and no real provider/network call, application database write, Supabase LIVE operation, Telegram action or trading action occurred during Phase 7.1.
+
+Next: Phase 7.2 is one foreground Haiku worker in MOCK mode against a newly created temporary PostgreSQL 16.6 cluster and a synthetic non-sensitive task. Never use `sireader_disposable` or another populated database as a test fixture. Phase 7.3 LIVE provider canary requires a separate explicit provider/model and budget approval.
+
+
+## Phase 7 — Central AI Harness implementation update — 2026-11-10
+
+See `docs/PHASE_7_AI_HARNESS.md` for the architecture, worker profiles, direct Anthropic request lifecycle, model price table, usage reporting and activation gates.
+
+Implementation update:
+- One central Anthropic Messages API gateway is shared by the trading AI pipeline and the AI-capable workforce provider. The historical `omniroute_client.py` path is an import-compatibility shim; the application no longer sends `/chat/completions` requests.
+- Direct model IDs are configured as `claude-haiku-5-5`, `claude-sonnet-5-5`, and `claude-opus-5-5`; agreed output ceilings are 700 / 1,400 / 1,800 tokens.
+- Before any billable Messages request, the gateway calls Anthropic's `POST /v1/messages/count_tokens`, uses its model-specific input-token result for the USD reservation, then dispatches one Messages request. If count preflight fails, the paid request is not sent. A post-dispatch uncertain outcome remains UNKNOWN and is not retried.
+- Production endpoint validation accepts only `https://api.anthropic.com`; custom HTTPS hosts are rejected so the API key is never sent to a proxy by accident.
+- Seven worker profiles and one central route resolver are present. Supervisor, Decision Engineer, Market Monitor and Data Archivist use bounded deterministic Python handlers; Haiku, Sonnet and Opus are the only profiles allowed to use the shared AI gateway. Supervisor remains deterministic by default.
+- Python prefilter skips only explicitly pure COMMENTARY bundles. Missing roles, unknown context, replies, edits, episode links and trade-related roles fail open to model analysis. Messages remain in stored history.
+- Anthropic USD usage can be reported by model, analysis, worker and task. Worker/task association uses the persisted request ID shared by `AIUsageLog.request_id` and `WorkTaskAttemptRecord.provider_request_id`; no schema migration was needed.
+- Truncated AI output returns MANUAL_REVIEW. Paid provider requests are not retried automatically after an unknown outcome.
+
+Offline focused verification in the project Python 3.12 environment (`C:\SIREADER\.venv`): **195 passed, 17 skipped, 0 failed**. The skipped tests require the isolated PostgreSQL integration fixture. `python -m compileall -q app tests/workers`, `python -m pip check`, and `git diff --check` all passed in this environment.
+
+The broader `pytest -q --ignore=test_connection.py` run using an intentionally unused loopback database URL did not finish and was stopped after remaining stalled without test output. `test_connection.py` itself exits at collection when the owner's actual `.env` database URL is absent. The full integration suite must be run with the project's disposable PostgreSQL fixture; never point it at `sireader_disposable` or Supabase LIVE.
+
+The unrelated global Python installation has FastAPI 0.162.2 / Starlette 0.37.2 dependency inconsistency. It was not used for final project verification and no package upgrade was made.
+
+Operational switches remain unchanged and fail-closed: `AI_PIPELINE_ENABLED=False`, `WORKER_RUNTIME_ENABLED=False`, `WORKER_PROVIDER_MODE=MOCK`, `WORKER_LIVE_PROVIDER_ENABLED=False`, `WORKER_MAX_TASK_COST_USD=0`. No API key was found in the selected backend environment. No live Anthropic request, worker start, database migration/write, Supabase LIVE operation, Telegram action, trading action, Git commit or push occurred.
+
+
+### Phase 7 final verification addendum — 2026-11-10
+
+Supersedes the earlier Phase 7 test counts in this runbook and `docs/PHASE_7_AI_HARNESS.md`:
+- Isolated API/PostgreSQL integration group: **229 passed, 0 failed, 0 skipped**.
+- Central AI Harness/provider/billing/worker unit group: **212 passed, 0 failed**.
+- Root backend regression tests (40 actual pytest files; manual smoke scripts excluded): **370 passed, 0 failed**.
+- Compileall passed for `app`, `tests/workers`, `tests/api` and `app/command_api`; project-venv `pip check` passed; `git diff --check` passed.
+- PostgreSQL tests used a fresh temporary PostgreSQL 16.6 instance on loopback port 55432, database `sireader_test`, entirely separate from the application's existing local database and Supabase. The temporary instance is removed after validation.
+- These groups overlap and are reported separately; their test counts must not be summed as unique tests.
+- A non-blocking Starlette/httpx TestClient deprecation warning remains.
+- Root `test_*.py` includes manual smoke scripts that make top-level database/MT5 calls; do not blindly collect them with pytest. The final root run selected only files with actual pytest test functions/classes.
+- No live Anthropic call, worker process, Telegram action, MT5 action, Supabase LIVE change, owner DB mutation, Git commit or push was performed. All live switches remain fail-closed. A live-model canary and production activation are separate operator approvals, not part of offline implementation acceptance.
+
+
+
+## Phase 7.2 — MOCK worker runtime acceptance (2026-11-10)
+
+- Executed the actual one-cycle Haiku runtime entrypoint `run_worker_once` against a fresh isolated PostgreSQL 16.6 cluster on loopback port 55432, database `sireader_test`; all seven canonical worker profiles/capabilities were seeded by the workforce migrations.
+- Deterministic QUICK_RESEARCH sample case: task and attempt COMPLETED, source SIMULATED, review PENDING, output remained quarantined (`task.result_payload=NULL`), no provider request/billing/cost, heartbeat STOPPED.
+- Deterministic non-sample case: task and attempt COMPLETED, source SIMULATED, no review row, normal result payload release, no provider request/billing/cost, heartbeat STOPPED.
+- Found and fixed a mismatch between the policy's no-review branch and the database result-release trigger. Added `migrations/2026_11_10_workforce_review_release_boundary_v2.sql` plus rollback. It allows trusted worker output only when no review row exists; PENDING reviews remain blocked, and `sireader_workforce_cmd` still cannot bypass approved/edited review adjudication.
+- Database guard probes passed: unapproved command-role release BLOCKED; PENDING review release BLOCKED. The additive migration was applied only on the isolated disposable test database, never on the application database or Supabase LIVE.
+- The temporary SQLAlchemy engine used `sslmode=disable` only for this local PostgreSQL test server, which did not provide SSL; production/application connection configuration was not changed.
+- No long-running worker process, Anthropic call, Telegram/MT5 action, production DB write, Supabase LIVE operation, Git commit or push occurred. Temporary task rows are synthetic and are deleted with the temporary PostgreSQL cluster.
+
+
+### Phase 7.2 foreground-process acceptance addendum — 2026-11-11
+
+The full process-level gate subsequently passed on a fresh SSL-enabled PostgreSQL 16.6 temporary cluster, loopback port 55441, database `sireader_test`. A test-only, non-superuser runtime login and RLS policy restricted the OS worker to Haiku. A temporary authenticated read-only API ran on loopback port 18000.
+
+A foreground `python -m app.workers.process --worker haiku --poll-interval 0.5` process was visible as READY through the API, claimed one benign synthetic QUICK_RESEARCH task, and completed it as SIMULATED. The API timeline showed TASK_CLAIMED → TASK_STARTED → HUMAN_REVIEW_QUEUED → TASK_COMPLETED. The PENDING review appeared in the review API after a missing `sireader_view_owner` RLS policy was corrected in the legacy review migration; result_payload remained NULL and the original output remained quarantined. Attempt provider ID/currency/cost were NULL.
+
+CTRL+C shutdown set the heartbeat to STOPPED and exited the first process. A second process instance started with a new instance ID, returned READY, and shut down cleanly to STOPPED. A test-only heartbeat timestamp change (two minutes old) caused the read-only API to report STALE. The temporary API, cluster, credentials, certificate/key and test directory were stopped/removed. The main app DB and Supabase LIVE were not touched.
+
+The migration fix and regression test now make the API review view show a PENDING record only through the security-barrier view while direct base-table reads remain denied. The focused PostgreSQL privilege/review-visibility suite passed **22/22** after the fix. Full offline backend `tests/` after changes: **237 passed, 46 skipped, 0 failed**; compileall and pip check passed. Skips require a separate disposable PostgreSQL URL.

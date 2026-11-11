@@ -214,9 +214,10 @@ def test_telemetry_separates_currencies_for_totals_reservations_and_models(api_c
     assert Decimal(models["sonnet-test"]["reserved"]) == Decimal("0.2")
 
 
-def test_telemetry_budget_observability_preserves_currency_and_links_workforce_costs(api_client):
+def test_telemetry_budget_observability_preserves_currency_and_links_workforce_costs(api_client, monkeypatch):
     client, sessions = api_client
     from app.api.config import api_settings as settings
+    monkeypatch.setattr(settings, "AI_ANTHROPIC_DAILY_BUDGET_USD", Decimal("5.00"))
 
     from zoneinfo import ZoneInfo
     today = datetime.now(ZoneInfo("Asia/Jakarta")).date()
@@ -258,6 +259,13 @@ def test_telemetry_budget_observability_preserves_currency_and_links_workforce_c
     assert Decimal(budget["daily_idr"]["budget_amount"]) == Decimal(str(settings.AI_TARGET_DAILY_BUDGET_RP))
     assert Decimal(budget["daily_idr"]["hard_limit_amount"]) == Decimal(str(settings.AI_HARD_DAILY_LIMIT_RP))
     assert budget["daily_idr"]["warning_level"] == "SOFT"
+    assert budget["daily_anthropic_usd"]["currency"] == "USD"
+    assert budget["daily_anthropic_usd"]["window"] == "DAILY"
+    assert Decimal(budget["daily_anthropic_usd"]["actual_cost"]) == Decimal("3.50")
+    assert Decimal(budget["daily_anthropic_usd"]["reserved_cost"]) == Decimal("0.50")
+    assert Decimal(budget["daily_anthropic_usd"]["projected_cost"]) == Decimal("4.00")
+    assert Decimal(budget["daily_anthropic_usd"]["hard_limit_amount"]) == Decimal("5.00")
+    assert budget["daily_anthropic_usd"]["warning_level"] == "SOFT"
     assert Decimal(budget["monthly_anthropic_usd"]["projected_cost"]) == Decimal("4.00")
     assert budget["monthly_anthropic_usd"]["warning_level"] == "SOFT"
     tiers = {item["tier"]: item for item in budget["idr_tiers"]}
@@ -433,6 +441,7 @@ def _safe_privilege_snapshot():
         "approved_view_owners_ok": True,
         "approved_view_select_ok": True,
         "view_owner_attributes_ok": True,
+        "approved_view_security_barrier_ok": True,
     }
 
 
@@ -461,6 +470,7 @@ def test_database_privilege_guard_accepts_strict_view_only_boundary():
     ("approved_view_owners_ok", False),
     ("approved_view_select_ok", False),
     ("view_owner_attributes_ok", False),
+    ("approved_view_security_barrier_ok", False),
 ])
 def test_database_privilege_guard_rejects_unsafe_boundary(key, value):
     snapshot = _safe_privilege_snapshot()

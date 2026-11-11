@@ -211,6 +211,21 @@ ALTER TABLE public.workforce_activity_events
         ]::text[])
     );
 
+-- Read-model owner policy is required for the security-barrier view to expose
+-- review metadata/payload rows while preserving RLS and denying direct API access.
+ALTER TABLE public.workforce_task_reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.workforce_task_review_payloads ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS workforce_view_owner_select ON public.workforce_task_reviews;
+CREATE POLICY workforce_view_owner_select
+    ON public.workforce_task_reviews FOR SELECT
+    TO sireader_view_owner USING (true);
+
+DROP POLICY IF EXISTS workforce_view_owner_select ON public.workforce_task_review_payloads;
+CREATE POLICY workforce_view_owner_select
+    ON public.workforce_task_review_payloads FOR SELECT
+    TO sireader_view_owner USING (true);
+
 -- 6. Security-Barrier Read View
 CREATE OR REPLACE VIEW public.v_api_workforce_task_reviews
 WITH (security_barrier = true) AS

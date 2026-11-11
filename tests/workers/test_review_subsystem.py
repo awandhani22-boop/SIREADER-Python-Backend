@@ -1287,7 +1287,7 @@ def test_workforce_policy_routes_model_tier_from_capability_and_worker():
         result = evaluate_workforce_policy(
             worker=registry[worker_id], task_type=task_type,
             required_capability=capability, title="Safe task",
-            input_payload={"record": "plain"}, provider_mode="OMNIROUTE",
+            input_payload={"record": "plain"}, provider_mode="ANTHROPIC", live_provider_enabled=True,
         )
         assert result.action is SensitiveTaskAction.ALLOW
         assert result.model_tier == expected_tier
@@ -1304,7 +1304,7 @@ def test_workforce_policy_redacts_credentials_before_any_provider_request():
             "api_token": "private-value",
             "description": "Use Bearer abc.def.ghi only as sample",
         },
-        provider_mode="OMNIROUTE",
+        provider_mode="ANTHROPIC", live_provider_enabled=True,
     )
     assert result.action is SensitiveTaskAction.REDACT
     assert result.sanitized_input["api_token"] == REDACTED
@@ -1321,7 +1321,7 @@ def test_workforce_policy_personal_data_is_redacted_and_forces_output_review():
         input_payload={
             "customer": {"email": "person@example.com", "status": "active"},
         },
-        provider_mode="OMNIROUTE",
+        provider_mode="ANTHROPIC", live_provider_enabled=True,
     )
     assert result.action is SensitiveTaskAction.REVIEW
     assert result.sanitized_input["customer"]["email"] == "[REDACTED_PERSONAL_DATA]"
@@ -1334,24 +1334,26 @@ def test_workforce_policy_rejects_live_execution_private_keys_and_market_workers
     trade = evaluate_workforce_policy(
         worker=registry["haiku"], task_type="QUICK_RESEARCH",
         required_capability="quick_research", title="Execute a live trade",
-        input_payload={"request": "ordinary research"}, provider_mode="OMNIROUTE",
+        input_payload={"request": "ordinary research"}, provider_mode="ANTHROPIC", live_provider_enabled=True,
     )
     private_key = evaluate_workforce_policy(
         worker=registry["haiku"], task_type="QUICK_RESEARCH",
         required_capability="quick_research", title="Inspect this key",
         input_payload={"data": "-----BEGIN PRIVATE KEY-----\nsecret"},
-        provider_mode="OMNIROUTE",
+        provider_mode="ANTHROPIC", live_provider_enabled=True,
     )
     market = evaluate_workforce_policy(
         worker=registry["market_monitor"], task_type="MARKET_WATCH",
         required_capability="market_monitoring_simulation",
         title="Summarize simulated market feed", input_payload={"ticks": []},
-        provider_mode="OMNIROUTE",
+        provider_mode="ANTHROPIC", live_provider_enabled=True,
     )
     assert trade.action is SensitiveTaskAction.REJECT
     assert private_key.action is SensitiveTaskAction.REJECT
-    assert market.action is SensitiveTaskAction.REJECT
-    assert market.reason_code == "LIVE_PROVIDER_WORKER_FORBIDDEN"
+    # Market Monitor remains eligible for deterministic Python handling in
+    # hybrid mode, but it receives no model tier and no provider inference.
+    assert market.action is SensitiveTaskAction.ALLOW
+    assert market.model_tier == "NONE"
 
 
 def test_workforce_policy_fails_closed_on_capability_task_mismatch():
@@ -1359,7 +1361,7 @@ def test_workforce_policy_fails_closed_on_capability_task_mismatch():
     result = evaluate_workforce_policy(
         worker=registry["haiku"], task_type="STRATEGIC_ANALYSIS",
         required_capability="quick_research", title="Mismatched task",
-        input_payload={}, provider_mode="OMNIROUTE",
+        input_payload={}, provider_mode="ANTHROPIC", live_provider_enabled=True,
     )
     assert result.action is SensitiveTaskAction.REJECT
     assert result.reason_code == "CAPABILITY_TASK_MISMATCH"
@@ -1566,7 +1568,7 @@ def test_workforce_policy_covers_every_general_provider_capability_and_task_pair
                     result = evaluate_workforce_policy(
                         worker=worker, task_type=task_type,
                         required_capability=capability_id, title="Policy matrix",
-                        input_payload={}, provider_mode="OMNIROUTE",
+                        input_payload={}, provider_mode="ANTHROPIC", live_provider_enabled=True,
                     )
                     assert result.action is SensitiveTaskAction.REJECT
                     assert result.reason_code == "TRADING_CAPABILITY_PROVIDER_FORBIDDEN"
@@ -1580,7 +1582,7 @@ def test_workforce_policy_covers_every_general_provider_capability_and_task_pair
                 result = evaluate_workforce_policy(
                     worker=worker, task_type=task_type,
                     required_capability=capability_id, title="Policy matrix",
-                    input_payload={}, provider_mode="OMNIROUTE",
+                    input_payload={}, provider_mode="ANTHROPIC", live_provider_enabled=True,
                 )
                 assert result.action is SensitiveTaskAction.ALLOW
                 assert result.model_tier == worker.model_tier
@@ -1600,7 +1602,7 @@ def test_workforce_policy_redacts_common_personal_identifiers():
                 "status": "active",
             },
         },
-        provider_mode="OMNIROUTE",
+        provider_mode="ANTHROPIC", live_provider_enabled=True,
     )
     record = result.sanitized_input["customer"]
     assert result.action is SensitiveTaskAction.REVIEW
