@@ -157,6 +157,41 @@ This continuation supersedes the earlier rehearsal wording where the first local
 
 **Backup qualification added 2026-11-12:** the Supabase organization is on the Free plan. Supabase's current documentation says automatic daily database backups are available on Pro/Team/Enterprise, while Free projects should export manually and keep off-site backups; PITR is a paid-plan add-on. The existing local custom-format dump created 2026-11-11 (495,806 bytes; SHA-256 `FC83D455703EC0A66BC656EFCC82D6D9D6513AFFDCFF94C96C63CCEEE2A12333`; archive metadata reports 872 TOC entries) passed `pg_restore --list` on 2026-11-12 and was used in the local PG17.11 restore rehearsal. It is not off-site or a fresh pre-cutover backup. Supabase's documented `supabase db dump` route requires Docker and separate roles/schema/data export; Docker and the Supabase CLI are not currently available as PATH commands on the workstation. Storage API objects and custom-role passwords are separate recovery items.
 
-**Runtime connection qualification (sanitized backend `.env` audit, 2026-11-12):** backend core `DATABASE_URL` targets the Supabase pooler using the `postgres`/admin identity and now explicitly adds `sslmode=require`; SSL-required, read-only `psql` probes passed for both core and `SIREADER_API_DATABASE_URL` against PostgreSQL 17.11. This proves that both backend client paths accept required SSL; it does not inspect the project-level Dashboard SSL Enforcement setting. The read-only API URL uses the dedicated API identity. Separately, the root `C:\SIREADER\.env` Supabase pooler `DATABASE_URL` failed password authentication during a read-only probe; its stored credential was left unchanged and not copied from the backend file. `SIREADER_WORKFORCE_COMMAND_DATABASE_URL` still targets loopback `sireader_disposable`; Review, Maintenance and `WORKER_DATABASE_URL` remain unset. `AI_PIPELINE_ENABLED`, `WORKER_RUNTIME_ENABLED`, `WORKER_LIVE_PROVIDER_ENABLED` and `AUTO_EXECUTION_ENABLED` are all `False`. This topology is not ready for a full hosted worker/command/review startup. Reconcile exact role targets before any service start or cutover.
+**Runtime connection qualification (sanitized backend `.env` audit, 2026-11-12):** backend core `DATABASE_URL` and `SIREADER_API_DATABASE_URL` use the Supabase Session Pooler with `sslmode=require`; TLS-required read-only connection probes passed against PostgreSQL 17.11. The API URL uses the dedicated read-only API identity. The root `C:\SIREADER\.env` core URL initially had a stale password. Its host, port, database, and login identity were confirmed to match the already-working backend URL; only the password segment was synchronized locally, without displaying or committing the secret. A SQLAlchemy probe with the root application's TLS-required connection then passed in an explicit read-only transaction (`current_database=postgres`, `current_user=postgres`, PostgreSQL 17.11, `transaction_read_only=on`). This validates client connectivity but does not inspect the project-level Dashboard SSL Enforcement setting. `SIREADER_WORKFORCE_COMMAND_DATABASE_URL` still targets loopback `sireader_disposable`; Review, Maintenance and `WORKER_DATABASE_URL` remain unset. `AI_PIPELINE_ENABLED`, `WORKER_RUNTIME_ENABLED`, `WORKER_LIVE_PROVIDER_ENABLED` and `AUTO_EXECUTION_ENABLED` are all `False`. This topology is not ready for a full hosted worker/command/review startup. Reconcile exact role targets before any service start or cutover.
 
 **Current disposition:** Phase 7.4 implementation, SQL, Python adapters, managed-like non-superuser migration/rollback rehearsal, actual LOGIN and HTTP acceptance are locally complete. The owner has explicitly skipped/waived hosted Supabase equivalent-staging to avoid recurring branch compute; this gate is SKIPPED, not PASSED. Production deployment remains NOT AUTHORIZED pending a fresh Supabase-aware manual export, protected off-site copy, isolated restore verification, approved change window and rollback operator, production secret provisioning, coherent core/API/Command/Review/Maintenance/Worker connection topology, TLS review, and owner sign-off. No password was provisioned, no paid provider request or worker was activated, and v1.0 remains NOT RELEASED.
+
+
+## Superseding full local regression and connection reconciliation — 2026-11-12
+
+This section supersedes earlier full-suite counts in the historical sections above. The earlier managed-like non-superuser forward/rollback/forward rehearsal and actual-login HTTP acceptance remain separate evidence and are not being reclassified.
+
+### Complete backend regression against disposable PostgreSQL 17.11
+
+A new empty local PostgreSQL 17.11 cluster was started on loopback only (127.0.0.1:55452) with a disposable sireader_test database. The full backend suite ran with SIREADER_TEST_POSTGRES_URL set to that local database:
+
+- **754 passed, 1 skipped, 0 failed**.
+- Python compileall -q app: PASS.
+- Explicit database acceptance modules also passed independently: PostgreSQL privilege/RLS/ACL **23 passed**; observability event migration **1 passed**; workforce runtime/provider gate **1 passed**; workforce timeline **5 passed**; Human Review **63 passed**.
+- The single remaining skip is retained as a skip; no skipped test is claimed as a pass.
+
+After the run, the local PG17.11 cluster was stopped, port 55452 was verified closed, and the temporary cluster/database directory was deleted. No database test was run against hosted Supabase.
+
+### Virtual Office regression
+
+- Official bun run test: **422 passed, 0 failed**.
+- bun run lint / TypeScript: PASS.
+- bun run build: PASS.
+- Existing non-blocking Vite bundle warning remains: main JavaScript bundle 1,511.12 kB minified / 405.35 kB gzip.
+
+### Local core connection credential/TLS reconciliation
+
+The legacy root C:\SIREADER\.env core DATABASE_URL initially failed authentication due to a stale local password. Its host, port, database, and login identity were verified to match the already-working backend core DATABASE_URL. Only the password segment was synchronized locally from the working backend value and sslmode=require was applied. No password was printed, committed, or sent to Git.
+
+A SQLAlchemy probe using the root application's TLS-required connection then completed successfully in an explicit read-only transaction: database postgres, server PostgreSQL 17.11, normalized current_user=postgres, and transaction_read_only=on. Backend core and dedicated read-only API connections also passed SSL-required read-only probes. The project-level Dashboard SSL Enforcement setting was not inspected.
+
+### Remaining hosted-production disposition
+
+The owner has skipped the paid hosted development-branch/managed-equivalent staging step. That step remains **SKIPPED**, not PASSED. The hosted Supabase database is unchanged and still has six API views rather than the fourteen required by the application startup contract, and it has no deployed workforce schema or production workforce authority roles.
+
+Production remains **NOT AUTHORIZED** pending a fresh Supabase-aware roles/schema/data backup, protected off-site copy and isolated restore verification; approved change window and rollback operator; production secret provisioning; and a coherent, separately reviewed core/API/Command/Review/Maintenance/Worker connection topology. The existing local 2026-11-11 custom-format archive is not a fresh off-site Supabase-aware backup. Runtime flags remain off, provider spend caps remain zero, no further paid inference ran, and v1.0 remains NOT RELEASED.
